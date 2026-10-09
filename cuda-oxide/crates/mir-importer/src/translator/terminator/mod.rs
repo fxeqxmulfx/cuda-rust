@@ -2827,7 +2827,12 @@ fn try_dispatch_intrinsic(
         )?));
     }
 
-    if let Some(intrinsic) = intrinsics::float_math::RustFloatMathIntrinsic::from_core_path(name) {
+    if let Some(intrinsic) =
+        intrinsics::float_math::RustFloatMathIntrinsic::from_core_path_with_substs(
+            name,
+            type_substs,
+        )
+    {
         return Ok(Some(
             intrinsics::float_math::emit_rust_float_math_intrinsic(
                 ctx,
@@ -2876,6 +2881,32 @@ fn try_dispatch_intrinsic(
             block_map,
             loc,
         )?)),
+        "core::intrinsics::integer_min"
+        | "std::intrinsics::integer_min"
+        | "core::intrinsics::integer_max"
+        | "std::intrinsics::integer_max" => {
+            let callee = if name.ends_with("::integer_min") {
+                dialect_mir::rust_intrinsics::CALLEE_INTEGER_MIN
+            } else {
+                dialect_mir::rust_intrinsics::CALLEE_INTEGER_MAX
+            };
+            let return_type = types::translate_destination_type(ctx, body, destination, &loc)?;
+            Ok(Some(helpers::emit_function_call(
+                ctx,
+                body,
+                callee,
+                args,
+                destination,
+                return_type,
+                None,
+                target,
+                block_ptr,
+                prev_op,
+                value_map,
+                block_map,
+                loc,
+            )?))
+        }
         "core::intrinsics::select_unpredictable" | "std::intrinsics::select_unpredictable" => {
             // `select_unpredictable(b, true_val, false_val)` is the
             // compiler-hint form of `if b { true_val } else { false_val }`,

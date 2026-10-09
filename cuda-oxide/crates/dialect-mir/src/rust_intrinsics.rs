@@ -45,6 +45,11 @@ pub const CALLEE_SATURATING_ADD: &str = placeholder!("saturating_add");
 /// Placeholder call used for `core::intrinsics::saturating_sub`.
 pub const CALLEE_SATURATING_SUB: &str = placeholder!("saturating_sub");
 
+/// Placeholder call used for `core::intrinsics::integer_min`.
+pub const CALLEE_INTEGER_MIN: &str = placeholder!("integer_min");
+/// Placeholder call used for `core::intrinsics::integer_max`.
+pub const CALLEE_INTEGER_MAX: &str = placeholder!("integer_max");
+
 /// Placeholder call used for `core::intrinsics::exact_div`.
 ///
 /// Division where the caller guarantees the divisor is non-zero and divides the
@@ -256,6 +261,8 @@ pub fn is_known_placeholder(callee: &str) -> bool {
                 | CALLEE_BITREVERSE
                 | CALLEE_SATURATING_ADD
                 | CALLEE_SATURATING_SUB
+                | CALLEE_INTEGER_MIN
+                | CALLEE_INTEGER_MAX
                 | CALLEE_EXACT_DIV
                 | CALLEE_CARRYING_MUL_ADD
                 | CALLEE_MAXNUM_NSZ_F32
@@ -491,6 +498,8 @@ mod tests {
         CALLEE_BITREVERSE,
         CALLEE_SATURATING_ADD,
         CALLEE_SATURATING_SUB,
+        CALLEE_INTEGER_MIN,
+        CALLEE_INTEGER_MAX,
         CALLEE_EXACT_DIV,
         CALLEE_CARRYING_MUL_ADD,
         CALLEE_FADD_FAST,

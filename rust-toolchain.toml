@@ -3,6 +3,6 @@
 # so `cargo` at the git root must not inherit the Oxide nightly under
 # cuda-oxide/. Keep this channel in lockstep with cutile-rs/rust-toolchain.toml.
 [toolchain]
-channel = "1.98.0"
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

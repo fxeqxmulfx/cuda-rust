@@ -2,6 +2,6 @@
 # Run workspace Clippy before updating. The reactor-verification CI job pins
 # nightly separately for native f16, Miri, and ThreadSanitizer.
 [toolchain]
-channel = "1.98.0"
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

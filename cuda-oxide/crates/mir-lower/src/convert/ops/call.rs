@@ -72,7 +72,8 @@ use dialect_mir::ops::{MirCallOp, MirFuncOp};
 use dialect_mir::rust_intrinsics;
 use dialect_mir::types::{MirDisjointSliceType, MirSliceType, MirStructType, MirTupleType};
 use llvm_export::attributes::{
-    FCmpPredicateAttr, FastmathFlags, FastmathFlagsAttr, IntegerOverflowFlagsAttr,
+    FCmpPredicateAttr, FastmathFlags, FastmathFlagsAttr, ICmpPredicateAttr,
+    IntegerOverflowFlagsAttr,
 };
 use llvm_export::op_interfaces::{
     BinArithOp, CastOpInterface, CastOpWithNNegInterface, FloatBinArithOpWithFastMathFlags,
@@ -641,6 +642,19 @@ pub fn convert(
         return convert_rust_select_unpredictable(ctx, rewriter, op);
     }
 
+    if matches!(
+        callee_name.as_str(),
+        rust_intrinsics::CALLEE_INTEGER_MIN | rust_intrinsics::CALLEE_INTEGER_MAX
+    ) {
+        return convert_rust_integer_minmax(
+            ctx,
+            rewriter,
+            op,
+            operands_info,
+            callee_name == rust_intrinsics::CALLEE_INTEGER_MIN,
+        );
+    }
+
     let callee_ident: pliron::identifier::Identifier = {
         let resolved_name = resolve_device_extern_symbol(&callee_name);
 
@@ -849,6 +863,48 @@ fn convert_rust_select_unpredictable(
         );
     };
     let select = llvm::SelectOp::new(ctx, *cond, *true_val, *false_val);
+    rewriter.insert_operation(ctx, select.get_operation());
+    rewriter.replace_operation(ctx, op, select.get_operation());
+    Ok(())
+}
+
+/// Lower integer min/max to compare/select, which both LLVM and libNVVM accept.
+/// The original MIR type supplies signedness before conversion to signless LLVM
+/// integers. LLVM's NVPTX backend folds this idiom into native min/max instructions.
+fn convert_rust_integer_minmax(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+    operands_info: &OperandsInfo,
+    is_min: bool,
+) -> Result<()> {
+    let loc = op.deref(ctx).loc();
+    if op.deref(ctx).get_num_results() != 1 {
+        return pliron::input_err!(loc, "integer min/max call must have one result");
+    }
+    let args: Vec<Value> = op.deref(ctx).operands().collect();
+    let [lhs, rhs] = args[..] else {
+        return pliron::input_err!(loc, "integer min/max expects exactly two operands");
+    };
+    if lhs.get_type(ctx) != rhs.get_type(ctx) {
+        return pliron::input_err!(loc, "integer min/max operands must have the same type");
+    }
+    let is_signed =
+        if let Some(int_ty) = operands_info.lookup_most_recent_of_type::<IntegerType>(ctx, lhs) {
+            int_ty.signedness() == Signedness::Signed
+        } else {
+            return pliron::input_err!(loc, "expected original integer type for integer min/max");
+        };
+    let predicate = match (is_signed, is_min) {
+        (true, true) => ICmpPredicateAttr::SLT,
+        (false, true) => ICmpPredicateAttr::ULT,
+        (true, false) => ICmpPredicateAttr::SGT,
+        (false, false) => ICmpPredicateAttr::UGT,
+    };
+    let compare = llvm::ICmpOp::new(ctx, predicate, lhs, rhs).get_operation();
+    rewriter.insert_operation(ctx, compare);
+    let condition = compare.deref(ctx).get_result(0);
+    let select = llvm::SelectOp::new(ctx, condition, lhs, rhs);
     rewriter.insert_operation(ctx, select.get_operation());
     rewriter.replace_operation(ctx, op, select.get_operation());
     Ok(())

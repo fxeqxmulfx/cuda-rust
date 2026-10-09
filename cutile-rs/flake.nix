@@ -129,9 +129,9 @@
         libcDev = pkgs.lib.getDev pkgs.stdenv.cc.libc;
         bindgenClangArgs = pkgs.lib.optionalString (!isDarwin) "-isystem ${libcDev}/include";
 
-        # Nightly Rust
+        # Stable Rust, matching the workspace and CI pin.
         rustToolchain =
-          pkgs.rust-bin.nightly."2025-07-16".default.override
+          (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override
             {
               extensions = [
                 "clippy"

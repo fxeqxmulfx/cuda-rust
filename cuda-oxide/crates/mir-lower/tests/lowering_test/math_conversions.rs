@@ -16,6 +16,98 @@ use pliron::operation::Operation;
 use crate::common::{append_return, build_test_kernel, lowered_kernel_body, make_test_ctx};
 
 #[test]
+fn integer_minmax_preserves_signedness_and_width_on_both_backends() -> Result<(), anyhow::Error> {
+    use dialect_mir::rust_intrinsics::{CALLEE_INTEGER_MAX, CALLEE_INTEGER_MIN};
+    use llvm_export::attributes::ICmpPredicateAttr;
+    use pliron::builtin::attributes::StringAttr;
+    use pliron::builtin::types::{IntegerType, Signedness};
+    use pliron::common_traits::Verify;
+    use pliron::r#type::{TypeHandle, Typed};
+
+    for backend in [
+        mir_lower::IntrinsicBackend::LlvmNvptx,
+        mir_lower::IntrinsicBackend::LibNvvm,
+    ] {
+        for width in [8, 16, 32, 64, 128] {
+            for (signedness, expected) in [
+                (
+                    Signedness::Signed,
+                    [ICmpPredicateAttr::SLT, ICmpPredicateAttr::SGT],
+                ),
+                (
+                    Signedness::Unsigned,
+                    [ICmpPredicateAttr::ULT, ICmpPredicateAttr::UGT],
+                ),
+            ] {
+                let mut ctx = make_test_ctx();
+                let ty: TypeHandle = IntegerType::get(&ctx, width, signedness).into();
+                let (module, entry) = build_test_kernel(&mut ctx, vec![ty, ty]);
+                let lhs = entry.deref(&ctx).get_argument(0);
+                let rhs = entry.deref(&ctx).get_argument(1);
+                for callee in [CALLEE_INTEGER_MIN, CALLEE_INTEGER_MAX] {
+                    let op = Operation::new(
+                        &mut ctx,
+                        mir::MirCallOp::get_concrete_op_info(),
+                        vec![ty],
+                        vec![lhs, rhs],
+                        vec![],
+                        0,
+                    );
+                    mir::MirCallOp::new(op)
+                        .set_attr_callee(&ctx, StringAttr::new(callee.to_string()));
+                    op.insert_at_back(entry, &ctx);
+                }
+                append_return(&mut ctx, entry);
+                mir_lower::lower_mir_to_llvm_with_options(
+                    &mut ctx,
+                    module,
+                    mir_lower::LoweringOptions {
+                        intrinsic_backend: backend,
+                        ..Default::default()
+                    },
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                module
+                    .deref(&ctx)
+                    .verify(&ctx)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let body = lowered_kernel_body(&ctx, module);
+                let comparisons: Vec<_> = body
+                    .iter()
+                    .filter_map(|&op| Operation::get_op::<llvm::ICmpOp>(op, &ctx))
+                    .collect();
+                assert_eq!(comparisons.len(), 2);
+                for (compare, predicate) in comparisons.iter().zip(expected) {
+                    assert_eq!(compare.predicate(&ctx), predicate);
+                    let compare_op = compare.get_operation();
+                    let select = body
+                        .iter()
+                        .copied()
+                        .find(|&op| {
+                            Operation::get_op::<llvm::SelectOp>(op, &ctx).is_some()
+                                && op.deref(&ctx).get_operand(0)
+                                    == compare_op.deref(&ctx).get_result(0)
+                        })
+                        .unwrap();
+                    assert_eq!(select.deref(&ctx).get_operand(1), lhs);
+                    assert_eq!(select.deref(&ctx).get_operand(2), rhs);
+                    assert_eq!(
+                        select.deref(&ctx).get_result(0).get_type(&ctx),
+                        IntegerType::get(&ctx, width, Signedness::Signless).into(),
+                    );
+                }
+                assert!(
+                    !body
+                        .iter()
+                        .any(|&op| Operation::get_op::<llvm::CallOp>(op, &ctx).is_some())
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn test_fast_float_intrinsics_lower_to_explicit_fast_binops() -> Result<(), anyhow::Error> {
     use dialect_mir::rust_intrinsics;
     use llvm_export::attributes::{FastmathFlags, FastmathFlagsAttr};

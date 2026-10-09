@@ -268,7 +268,7 @@ impl NameResolver {
                     let trait_ident = impl_item
                         .trait_
                         .as_ref()
-                        .map(|(_, path, _)| path.segments.last().unwrap().ident.to_string());
+                        .map(|(path, _)| path.segments.last().unwrap().ident.to_string());
 
                     match (&self_ident, &trait_ident) {
                         (Some(self_name), Some(trait_name)) => {

@@ -2,7 +2,7 @@ use mir::{
     syntax::{FloatTy, IntTy, Literal, TyId, TyKind, UintTy},
     tyctxt::TyCtxt,
 };
-use rand::{Rng, RngCore, seq::IndexedRandom};
+use rand::{Rng, RngExt, seq::IndexedRandom};
 use rand_distr::Distribution;
 
 struct UsizeSombrero {
@@ -111,7 +111,7 @@ pub trait GenLiteral: Rng {
     }
 }
 
-impl<R: RngCore + ?Sized> GenLiteral for R {}
+impl<R: Rng + ?Sized> GenLiteral for R {}
 
 enum Category {
     Normal,
@@ -188,20 +188,23 @@ mod tests {
         }
     }
 
-    impl RngCore for SequenceRng {
-        fn next_u32(&mut self) -> u32 {
-            self.next_u64() as u32
+    impl rand::TryRng for SequenceRng {
+        type Error = std::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.next_u64() as u32)
         }
 
-        fn next_u64(&mut self) -> u64 {
-            self.values.pop_front().expect("test RNG value")
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(self.values.pop_front().expect("test RNG value"))
         }
 
-        fn fill_bytes(&mut self, dst: &mut [u8]) {
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             for chunk in dst.chunks_mut(std::mem::size_of::<u64>()) {
                 let bytes = self.next_u64().to_le_bytes();
                 chunk.copy_from_slice(&bytes[..chunk.len()]);
             }
+            Ok(())
         }
     }
 

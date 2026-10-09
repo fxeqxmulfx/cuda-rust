@@ -789,6 +789,7 @@ pub fn strip_generics_lifetimes(generics: &mut Generics) {
 /// Pretty-prints a single `syn::Item` via `prettyplease`.
 pub fn item_string_pretty(item: &Item) -> String {
     let file = syn::File {
+        frontmatter: None,
         attrs: vec![],
         items: vec![item.clone()],
         shebang: None,

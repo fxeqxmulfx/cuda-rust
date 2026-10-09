@@ -34,6 +34,7 @@ const INSTALL_DIR_ENV: &str = "CUDA_TILE_TRANSLATE_INSTALL_DIR";
 const CACHE_ENABLE_ENV: &str = "CUDA_TILE_RS_CACHE";
 const CACHE_DIR_ENV: &str = "CUDA_TILE_RS_CACHE_DIR";
 const CLEAR_CACHE_ENV: &str = "CUDA_TILE_RS_CLEAR_CACHE";
+const LLVM_INSTALL_DIR_ENV: &str = "CUDA_TILE_USE_LLVM_INSTALL_DIR";
 const SHA_LEN: usize = 12;
 
 const CUDA_TILE_STATIC_LIBS: &[&str] = &[
@@ -55,6 +56,7 @@ fn main() {
         CACHE_ENABLE_ENV,
         CACHE_DIR_ENV,
         CLEAR_CACHE_ENV,
+        LLVM_INSTALL_DIR_ENV,
     ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
@@ -79,12 +81,32 @@ fn main() {
 
     // 1. Resolve build+install tree location (default: $OUT_DIR; opt-in cache
     //    under ~/.cache/cuda-tile-rs/<key>/).
-    let build_root = resolve_build_root(&submodule, &out_dir);
+    let llvm_install_dir = env::var_os(LLVM_INSTALL_DIR_ENV)
+        .map(|path| fs::canonicalize(path).expect("canonicalize CUDA_TILE_USE_LLVM_INSTALL_DIR"));
+    // External installations can change independently of the pinned LLVM
+    // commit, so keep their builds in Cargo's tracked OUT_DIR.
+    let build_root = if llvm_install_dir.is_some() {
+        out_dir.clone()
+    } else {
+        resolve_build_root(&submodule, &out_dir)
+    };
     fs::create_dir_all(&build_root).expect("failed to create build root");
 
     // 2. Build cuda-tile + LLVM via cmake. We don't ask for the combined
     //    MLIR-C dylib — linking is done by enumerating static libs below.
-    let install_prefix = Config::new(&submodule)
+    let mut config = Config::new(&submodule);
+    if let Some(llvm_install_dir) = &llvm_install_dir {
+        config.define(LLVM_INSTALL_DIR_ENV, llvm_install_dir);
+        println!(
+            "cargo:rerun-if-changed={}/lib/cmake/llvm/LLVMConfig.cmake",
+            llvm_install_dir.display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}/lib/cmake/mlir/MLIRConfig.cmake",
+            llvm_install_dir.display()
+        );
+    }
+    let install_prefix = config
         .out_dir(&build_root)
         .define("CMAKE_BUILD_TYPE", "Release")
         .define("LLVM_ENABLE_ASSERTIONS", "OFF")
@@ -103,30 +125,34 @@ fn main() {
     let llvm_build_include = llvm_build.join("include");
     let mlir_build_include = llvm_build.join("tools").join("mlir").join("include");
 
-    for p in [
-        &cuda_tile_include,
-        &mlir_src_include,
-        &llvm_src_include,
-        &llvm_build_include,
-        &mlir_build_include,
-    ] {
+    let llvm_includes = if let Some(llvm_install_dir) = &llvm_install_dir {
+        vec![llvm_install_dir.join("include")]
+    } else {
+        vec![
+            mlir_src_include,
+            llvm_src_include,
+            mlir_build_include,
+            llvm_build_include,
+        ]
+    };
+    for p in std::iter::once(&cuda_tile_include).chain(&llvm_includes) {
         assert!(p.exists(), "expected include path missing: {}", p.display());
     }
 
     // 4. Generate bindings. Layout tests off (MLIR macro-generated opaque
     //    structs occasionally trip bindgen's size assertions).
-    let bindings = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         .header(manifest_dir.join("wrapper.h").to_string_lossy())
         .clang_arg(format!("-I{}", cuda_tile_include.display()))
         .clang_arg(format!("-I{}", cuda_tile_install_include.display()))
-        .clang_arg(format!("-I{}", mlir_src_include.display()))
-        .clang_arg(format!("-I{}", llvm_src_include.display()))
-        .clang_arg(format!("-I{}", mlir_build_include.display()))
-        .clang_arg(format!("-I{}", llvm_build_include.display()))
         .allowlist_file(".*/mlir-c/.*")
         .allowlist_file(".*/cuda_tile-c/.*")
         .layout_tests(false)
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
+    for path in &llvm_includes {
+        builder = builder.clang_arg(format!("-I{}", path.display()));
+    }
+    let bindings = builder
         .generate()
         .expect("bindgen failed to generate MLIR + cuda-tile bindings");
     bindings
@@ -139,7 +165,7 @@ fn main() {
     // produced, wrap them in linker `--start-group`/`--end-group` so the
     // linker resolves cross-references without hand-ordering.
     let lib_dir = install_prefix.join("lib");
-    let llvm_lib_dir = llvm_build.join("lib");
+    let llvm_lib_dir = llvm_install_dir.as_ref().unwrap_or(&llvm_build).join("lib");
 
     // -L paths go on the linker command line directly.
     println!("cargo:rustc-link-arg=-L{}", lib_dir.to_string_lossy());
@@ -185,6 +211,20 @@ fn main() {
 
     for lib in &system_libs {
         println!("cargo:rustc-link-arg=-l{lib}");
+    }
+    if let Some(llvm_install_dir) = &llvm_install_dir {
+        let output = std::process::Command::new(llvm_install_dir.join("bin/llvm-config"))
+            .args(["--link-static", "--system-libs"])
+            .output()
+            .expect("run installed llvm-config --system-libs");
+        assert!(
+            output.status.success(),
+            "installed llvm-config --system-libs failed"
+        );
+        let flags = String::from_utf8(output.stdout).expect("llvm-config output is UTF-8");
+        for flag in flags.split_whitespace() {
+            println!("cargo:rustc-link-arg={flag}");
+        }
     }
     println!("cargo:rustc-link-arg=-lstdc++");
 

@@ -15,4 +15,4 @@ object-read = ["dep:object", "object/read", "object/std"]
 object-write = ["dep:object", "object/write"]
 
 [dependencies]
-object = { version = "0.36", optional = true, default-features = false }
+object = { version = "0.40.0", optional = true, default-features = false }

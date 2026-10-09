@@ -10,7 +10,7 @@ keywords = ["cuda", "ffi", "nvidia", "mathdx", "fft", "blas"]
 categories = ["external-ffi-bindings", "science"]
 
 [build-dependencies]
-bindgen = "0.72.1"
+bindgen = "0.73.2"
 
 [dependencies]
 

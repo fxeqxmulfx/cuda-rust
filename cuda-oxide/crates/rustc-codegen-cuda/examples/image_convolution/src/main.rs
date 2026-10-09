@@ -350,7 +350,10 @@ fn run_image_demo(input_path: &str, output_path: &str) -> Result<(), Box<dyn std
 
     let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(input_path)?));
     let mut reader = decoder.read_info()?;
-    let mut buffer = vec![0u8; reader.output_buffer_size()];
+    let buffer_size = reader
+        .output_buffer_size()
+        .ok_or("decoded PNG buffer exceeds the platform's addressable memory")?;
+    let mut buffer = vec![0u8; buffer_size];
     let info = reader.next_frame(&mut buffer)?;
     let bytes = &buffer[..info.buffer_size()];
 

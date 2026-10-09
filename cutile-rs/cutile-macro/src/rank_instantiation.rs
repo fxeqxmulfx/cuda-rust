@@ -824,14 +824,14 @@ fn rewrite_type_for_rank(ty: &Type, instances: &RankBindings) -> Result<Type, Er
                     result_type.path.segments[last_idx].arguments =
                         PathArguments::AngleBracketed(new_args);
                 }
-                return Ok(result_type.into());
+                return Ok(Type::Path(result_type));
             }
 
             let mut result_type = type_path.clone();
             let path = rewrite_path_for_rank(&result_type.path, instances, PathContext::Type)?;
             result_type.path = path;
             // println!("rewrite_type_for_rank: ")
-            result_type.into()
+            Type::Path(result_type)
         }
         Type::Array(type_array) => {
             let mut result = type_array.clone();
@@ -852,12 +852,12 @@ fn rewrite_type_for_rank(ty: &Type, instances: &RankBindings) -> Result<Type, Er
                     )
                 })?;
             }
-            result.into()
+            Type::Array(result)
         }
         Type::Reference(ref_type) => {
             let mut result = ref_type.clone();
             *result.elem = rewrite_type_for_rank(&ref_type.elem, instances)?;
-            result.into()
+            Type::Reference(result)
             // unimplemented!("Type::Reference not implemented: {:#?}", ref_type)
         }
         Type::Tuple(tuple_type) => {
@@ -1143,7 +1143,7 @@ impl RankInstantiator {
         *item.self_ty = rewrite_type_for_rank(&item.self_ty, &self.bindings)?;
         rewrite_generics_for_rank(&mut item.generics, &self.bindings)?;
         if let Some(trait_) = &mut item.trait_ {
-            let path = &mut trait_.1;
+            let path = &mut trait_.0;
             if path.segments.is_empty() {
                 return Err(syn_err(
                     path.span(),

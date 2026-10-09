@@ -51,9 +51,9 @@ repository = "https://github.com/NVlabs/cuda-oxide.git"
 # cuda-oxide consumes the dialect modeling only, not the FFI bridge.
 # `crates/rustc-codegen-cuda/Cargo.toml` MUST stay on this same rev, or pliron
 # resolves to two distinct crates and types stop unifying.
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "06d99a3df938394583715aacf5eadb65b4791c09" }
-pliron-derive = { git = "https://github.com/pliron-org/pliron", rev = "06d99a3df938394583715aacf5eadb65b4791c09" }
-pliron-llvm = { git = "https://github.com/pliron-org/pliron", rev = "06d99a3df938394583715aacf5eadb65b4791c09", default-features = false, features = [
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
+pliron-derive = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97" }
+pliron-llvm = { git = "https://github.com/pliron-org/pliron", rev = "6ff5b3c8a6d5553b8cbee19d58f3c039f10e5a97", default-features = false, features = [
     "std",
 ] }
 
@@ -102,31 +102,31 @@ ptx-parse = { path = "crates/ptx-parse" }
 ptx-schedule = { path = "crates/ptx-schedule" }
 
 # Common dependencies
-futures = "0.3"
-thiserror = "2"
-linkme = "0.3"
-anyhow = "1.0"
-once_cell = "1.18"
-combine = "4.6"
-log = "0.4"
-half = "2.7"
-libloading = "0.8"
-sha2 = "0.10"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "1"
-tempfile = "3.9"
-rustc-demangle = "0.1"
+futures = "0.3.34"
+thiserror = "2.0.21"
+linkme = "0.3.37"
+anyhow = "1.0.104"
+once_cell = "1.21.4"
+combine = "4.6.8"
+log = "0.4.34"
+half = "2.7.1"
+libloading = "0.9.0"
+sha2 = "0.11.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.8"
+tempfile = "3.27.0"
+rustc-demangle = "0.1.28"
 
 # llvm-export deps
-rustc-hash = "2.0"
-bitflags = "2.0"
-dyn-clone = "1.0"
+rustc-hash = "2.1.3"
+bitflags = "2.13.2"
+dyn-clone = "1.0.20"
 
 # cuda-macros deps
-quote = "1.0"
-syn = { version = "2.0", features = ["full", "visit", "visit-mut"] }
-proc-macro2 = { version = "1.0", features = ["span-locations"] }
+quote = "1.0.47"
+syn = { version = "3.0.6", features = ["full", "visit", "visit-mut"] }
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 
 # `cargo oxide` runs through the workspace's dev-profile Cargo alias. Its
 # backend fingerprint hashes a large debug shared object on every invocation;

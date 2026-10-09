@@ -35,6 +35,23 @@ Build it explicitly:
 cargo build --release -p cuda-tile-rs
 ```
 
+### Prebuilt LLVM / MLIR
+
+An installation containing LLVM and MLIR headers, static libraries, CMake
+packages and tools can replace the LLVM source build:
+
+```bash
+CUDA_TILE_USE_LLVM_INSTALL_DIR=/path/to/llvm-install \
+    cargo build --release -p cuda-tile-rs
+```
+
+Use the LLVM major required by the bundled cuda-tile revision (currently 24).
+LLVM / MLIR 23 lacks the TableGen properties used by this revision. The
+default source build uses cuda-tile's exact LLVM commit pin. Builds against
+an external installation use Cargo's build directory instead of the optional
+commit-addressed cache, because the installation can change independently
+of those pins.
+
 ### Caching (opt-in)
 
 By default, cmake builds into cargo's `$OUT_DIR`; `cargo clean` wipes it and

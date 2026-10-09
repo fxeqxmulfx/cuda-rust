@@ -10,7 +10,7 @@ repository.workspace = true
 
 [dependencies]
 half = { workspace = true }
-indexmap = "2"
+indexmap = "2.14.2"
 thiserror = { workspace = true }
 uuid = { workspace = true }
 

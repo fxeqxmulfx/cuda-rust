@@ -348,7 +348,10 @@ fn module_inner(
     );
 
     // Compute SHA-256 source hash at macro expansion time.
-    let source_hash = format!("{:x}", Sha256::digest(raw_item_source.as_bytes()));
+    let source_hash: String = Sha256::digest(raw_item_source.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
 
     // Per-module source hash, used by the launch/compile path for cache keying.
     // Warmup no longer needs generated entry metadata: pre-compilation is done
@@ -850,7 +853,7 @@ pub fn kernel_launcher(
     let function_entry_name = kernel_naming.entry_name();
     let launcher_name = function_name.to_case(Case::UpperCamel).to_string();
     let launcher_args_name = format!("{}Args", launcher_name);
-    let unsafety = item.sig.unsafety;
+    let unsafety = &item.sig.safety;
     let launcher_item =
         cutile_compiler::type_aliases::normalize_item_fn_param_type_aliases(item, type_aliases)
             .map_err(|msg| crate::error::syn_err(item.sig.ident.span(), &msg))?;

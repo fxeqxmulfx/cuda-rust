@@ -141,7 +141,7 @@ impl ResolvedType {
                 elem: Box::new(Self::from_syn_type(&reference.elem)),
             },
             Type::Ptr(ptr) => Self::Pointer {
-                mutable: ptr.mutability.is_some(),
+                mutable: matches!(ptr.mutability, syn::PointerMutability::Mut(_)),
                 elem: Box::new(Self::from_syn_type(&ptr.elem)),
             },
             Type::Tuple(tuple) if tuple.elems.is_empty() => Self::Unit,
@@ -162,6 +162,7 @@ impl ResolvedType {
         match self {
             Self::Scalar(scalar) => scalar.to_syn_type(),
             Self::Adt { path } => Type::Path(syn::TypePath {
+                attrs: Vec::new(),
                 qself: None,
                 path: path.clone(),
             }),
@@ -184,6 +185,7 @@ impl ResolvedType {
             Self::Tuple(elems) => {
                 let elems = elems.iter().map(Self::to_syn_type).collect();
                 Type::Tuple(syn::TypeTuple {
+                    attrs: Vec::new(),
                     paren_token: syn::token::Paren::default(),
                     elems,
                 })
@@ -672,6 +674,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                 let inner = self.infer_expr(&reference.expr, None)?;
                 inner.map(|mut ty| {
                     ty.rust_ty = Type::Reference(syn::TypeReference {
+                        attrs: Vec::new(),
                         and_token: reference.and_token,
                         lifetime: None,
                         mutability: reference.mutability,
@@ -1878,6 +1881,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
                     return Ok(None);
                 };
                 Ok(Some(Type::Reference(syn::TypeReference {
+                    attrs: Vec::new(),
                     and_token: reference.and_token,
                     lifetime: None,
                     mutability: reference.mutability,
@@ -2003,6 +2007,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
         expected: Option<TileRustType>,
     ) -> Result<Option<TileRustType>, JITError> {
         let struct_ty = Type::Path(syn::TypePath {
+            attrs: Vec::new(),
             qself: None,
             path: struct_expr.path.clone(),
         });
@@ -2162,6 +2167,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             return None;
         };
         let path_ty = Type::Path(syn::TypePath {
+            attrs: Vec::new(),
             qself: None,
             path: path_expr.path.clone(),
         });
@@ -2203,6 +2209,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             return Ok(None);
         }
         let tuple_ty = Type::Tuple(syn::TypeTuple {
+            attrs: Vec::new(),
             paren_token: syn::token::Paren::default(),
             elems: elem_types.into_iter().collect(),
         });
@@ -2330,6 +2337,7 @@ impl<'a, 'm> TypeInferenceCx<'a, 'm> {
             }
         }
         let tuple_ty = Type::Tuple(syn::TypeTuple {
+            attrs: Vec::new(),
             paren_token: syn::token::Paren::default(),
             elems: elem_types.into_iter().collect(),
         });
@@ -3730,7 +3738,7 @@ fn closure_signature_from_bounds(
             syn::ReturnType::Type(_, ty) => Some(*ty.clone()),
         };
         return Some(ClosureSignature {
-            inputs: args.inputs.iter().cloned().collect(),
+            inputs: args.inputs.iter().map(|arg| arg.ty.clone()).collect(),
             output,
         });
     }

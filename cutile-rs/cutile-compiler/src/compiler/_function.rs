@@ -530,7 +530,9 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         let proof_results = ProofResults::analyze_entry_attrs(&entry_attrs)?;
 
         // 5. Check unchecked_accesses.
-        if entry_attrs.get_entry_arg_bool("unchecked_accesses") && function.sig.unsafety.is_none() {
+        if entry_attrs.get_entry_arg_bool("unchecked_accesses")
+            && !matches!(function.sig.safety, syn::Safety::Unsafe(_))
+        {
             return modules
                 .resolve_span(module_name, &function.span())
                 .jit_error_result(
@@ -615,7 +617,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         // 11. Optional print_ir.
         if entry_attrs.get_entry_arg_bool("print_ir") {
             println!("GENERATED ENTRY POINT: {module_name}::{function_name}");
-            println!("{}", item_string_pretty(&entry.clone().into()));
+            println!("{}", item_string_pretty(&syn::Item::Fn(entry.clone())));
             println!();
         }
 

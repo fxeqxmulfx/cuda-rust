@@ -227,7 +227,7 @@ fn path_text(path: &Path) -> io::Result<String> {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    hex(Sha256::digest(bytes).as_slice())
+    hex(&Sha256::digest(bytes))
 }
 
 fn hex(bytes: &[u8]) -> String {

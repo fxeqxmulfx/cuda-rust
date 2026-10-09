@@ -496,7 +496,7 @@ fn grid_constant_rejects_invalid_parameter_contracts() {
                     );
                 }
                 "incomplete" => {
-                    attrs.0.remove(
+                    attrs.0.remove::<pliron::identifier::Identifier>(
                         &format!("{LLVM_GRID_CONSTANT_ALIGN_ATTR_PREFIX}0")
                             .as_str()
                             .try_into()

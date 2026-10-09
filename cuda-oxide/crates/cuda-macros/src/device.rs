@@ -143,7 +143,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
     let generics = &input.sig.generics;
     let where_clause = &input.sig.generics.where_clause;
     let constness = &input.sig.constness;
-    let unsafety = &input.sig.unsafety;
+    let unsafety = &input.sig.safety;
     let abi = &input.sig.abi;
 
     let (wrapper_inputs, params) = match forwarding_inputs(&input.sig.inputs) {
@@ -171,7 +171,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
         let codegen_args = codegen_generic_arguments(generics);
         let turbofish = quote! { ::<#(#codegen_args),*> };
         let call = quote! { #new_name #turbofish (#(#params),*) };
-        let call = if unsafety.is_some() {
+        let call = if matches!(unsafety, syn::Safety::Unsafe(_)) {
             quote! { unsafe { #call } }
         } else {
             call
@@ -191,7 +191,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
         TokenStream::from(expanded)
     } else {
         let call = quote! { #new_name(#(#params),*) };
-        let call = if unsafety.is_some() {
+        let call = if matches!(unsafety, syn::Safety::Unsafe(_)) {
             quote! { unsafe { #call } }
         } else {
             call

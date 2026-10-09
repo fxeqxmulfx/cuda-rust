@@ -19,6 +19,7 @@ use cuda_async::device_context::{
 };
 use proc_macro2::Ident;
 use proc_macro2::Span;
+use proc_macro2::TokenStream;
 use quote::ToTokens;
 use std::collections::HashMap;
 use syn::punctuated::Punctuated;
@@ -640,7 +641,7 @@ pub fn generate_entry_point(
         .iter()
         .map(|x| x.to_token_stream().to_string())
         .collect::<Vec<_>>();
-    let unsafety_str = if fn_item.sig.unsafety.is_some() {
+    let unsafety_str = if matches!(fn_item.sig.safety, syn::Safety::Unsafe(_)) {
         "unsafe"
     } else {
         ""
@@ -907,7 +908,25 @@ impl SpanSetter {
 }
 
 impl VisitMut for SpanSetter {
-    fn visit_span_mut(&mut self, span: &mut Span) {
-        *span = self.target_span;
+    fn visit_item_fn_mut(&mut self, item: &mut syn::ItemFn) {
+        // Syn 3 no longer traverses spans. Respan the complete token tree so
+        // identifiers, literals and delimiters all use the wrapper's context.
+        fn respan(tokens: TokenStream, span: Span) -> TokenStream {
+            tokens
+                .into_iter()
+                .map(|mut token| {
+                    if let proc_macro2::TokenTree::Group(group) = token {
+                        token = proc_macro2::TokenTree::Group(proc_macro2::Group::new(
+                            group.delimiter(),
+                            respan(group.stream(), span),
+                        ));
+                    }
+                    token.set_span(span);
+                    token
+                })
+                .collect()
+        }
+        *item = syn::parse2(respan(item.to_token_stream(), self.target_span))
+            .expect("respanning a generated function preserves its syntax");
     }
 }

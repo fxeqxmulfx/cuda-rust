@@ -22,5 +22,5 @@ dyn-clone = { workspace = true }
 reserved-oxide-symbols = { workspace = true }
 
 [dev-dependencies]
-expect-test = "1.4"
+expect-test = "1.5.1"
 libnvvm-sys = { workspace = true }

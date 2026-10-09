@@ -13,7 +13,7 @@ use mir::syntax::{
     SwitchTargets, Terminator, TyId, TyKind, UnOp, VariantIdx,
 };
 use mir::tyctxt::TyCtxt;
-use rand::{Rng, RngCore, SeedableRng, seq::IteratorRandom};
+use rand::{Rng, RngExt, SeedableRng, seq::IteratorRandom};
 use rand_distr::{Distribution, weighted::Error, weighted::WeightedIndex};
 
 use crate::literal::GenLiteral;
@@ -57,7 +57,7 @@ pub struct SavedCtx {
 }
 
 pub struct GenerationCtx {
-    rng: RefCell<Box<dyn RngCore>>,
+    rng: RefCell<Box<dyn Rng>>,
     program: Program,
     tcx: Rc<TyCtxt>,
     ty_weights: TySelect,
@@ -92,7 +92,7 @@ impl GenerationCtx {
         operand.or_else(|_| {
             let literalble: Vec<TyId> = tys
                 .iter()
-                .filter(|ty| <dyn RngCore>::is_literalble(**ty, &self.tcx))
+                .filter(|ty| <dyn Rng>::is_literalble(**ty, &self.tcx))
                 .copied()
                 .collect();
             if literalble.is_empty() {
@@ -632,7 +632,7 @@ impl GenerationCtx {
             .indices()
             .skip(1) // avoid the unnamable first bb
             .filter(|&bb| bb != self.cursor.basic_block)
-            .choose_multiple(self.rng.get_mut(), pick_from_existing);
+            .sample(self.rng.get_mut(), pick_from_existing);
         assert_eq!(picked.len(), pick_from_existing);
 
         let copies = self
@@ -642,7 +642,7 @@ impl GenerationCtx {
             .skip(1) // avoid the unnamable first bb
             .rev()
             .skip(1) // avoid the current bb
-            .choose_multiple(self.rng.get_mut(), new);
+            .sample(self.rng.get_mut(), new);
 
         for i in 0..new {
             let new_bb = self.add_new_bb();
@@ -964,7 +964,7 @@ impl GenerationCtx {
         // TODO: weight this?
         let dumpped: Vec<Local> = dumpable
             .into_iter()
-            .choose_multiple(self.rng.get_mut(), dump_count);
+            .sample(self.rng.get_mut(), dump_count);
 
         let new_bb = self.add_new_bb();
         self.current_bb_mut()
@@ -1228,8 +1228,8 @@ impl GenerationCtx {
         let arg_tys: Vec<TyId> = self
             .tcx
             .indices()
-            .filter(|ty| <dyn RngCore>::is_literalble(*ty, &self.tcx))
-            .choose_multiple(&mut *self.rng.borrow_mut(), args_count);
+            .filter(|ty| <dyn Rng>::is_literalble(*ty, &self.tcx))
+            .sample(&mut *self.rng.borrow_mut(), args_count);
         let arg_literals: Vec<Literal> = arg_tys
             .iter()
             .map(|ty| {

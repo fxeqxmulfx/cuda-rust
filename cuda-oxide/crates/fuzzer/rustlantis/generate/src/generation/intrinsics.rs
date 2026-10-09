@@ -4,7 +4,7 @@ use mir::{
     syntax::{Callee, Mutability, Operand, Place, TyId, TyKind},
     tyctxt::TyCtxt,
 };
-use rand::{Rng, seq::IteratorRandom};
+use rand::{RngExt, seq::IteratorRandom};
 
 use crate::{literal::GenLiteral, mem::BasicMemory, place_select::PlaceSelector};
 

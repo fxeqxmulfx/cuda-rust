@@ -24,7 +24,7 @@ cuda-async = { workspace = true, optional = true }
 
 # Platform-correct flags and device identity for cache and mapped-image reads.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
-libc = "0.2"
+libc = "0.2.190"
 
 [features]
 default = []

@@ -744,7 +744,13 @@ pub fn get_sig_param_mutability(sig: &Signature) -> Vec<bool> {
     let mut result = vec![];
     for arg in &sig.inputs {
         let is_mutable = match arg {
-            FnArg::Receiver(receiver) => receiver.mutability.is_some(),
+            FnArg::Receiver(receiver) => match &receiver.kind {
+                syn::ReceiverKind::Reference(_, _, mutability) => mutability.is_some(),
+                syn::ReceiverKind::Typed(_, ty) => {
+                    receiver.mutability.is_some() || get_type_mutability(ty)
+                }
+                _ => receiver.mutability.is_some(),
+            },
             FnArg::Typed(fn_param) => {
                 let pat_mutability = get_pat_mutability(&fn_param.pat);
                 let ty_mutability = get_type_mutability(&fn_param.ty);
@@ -959,4 +965,31 @@ pub fn try_extract_cga(ty: &Type, generic_vars: &GenericVars) -> Option<Vec<i32>
         }
     }
     result
+}
+
+#[cfg(test)]
+mod receiver_mutability_tests {
+    use super::get_sig_param_mutability;
+
+    #[test]
+    fn receiver_mutability_tracks_reference_value_and_explicit_type() {
+        for (receiver, expected) in [
+            ("self", false),
+            ("mut self", true),
+            ("&self", false),
+            ("&mut self", true),
+            ("&'a mut self", true),
+            ("self: &Self", false),
+            ("self: &mut Self", true),
+            ("self: Box<Self>", false),
+            ("mut self: Box<Self>", true),
+        ] {
+            let signature = syn::parse_str(&format!("fn method({receiver})")).unwrap();
+            assert_eq!(
+                get_sig_param_mutability(&signature),
+                [expected],
+                "{receiver}"
+            );
+        }
+    }
 }

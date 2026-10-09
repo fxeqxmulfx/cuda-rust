@@ -94,7 +94,7 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
     let inputs = &input.sig.inputs;
     let output = &input.sig.output;
     let constness = &input.sig.constness;
-    let unsafety = &input.sig.unsafety;
+    let unsafety = &input.sig.safety;
     let abi = &input.sig.abi;
     let block = &input.block;
 
@@ -197,7 +197,7 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
     };
     let implementation_call =
         quote! { #implementation_target #kernel_turbofish (#(#implementation_args),*) };
-    let implementation_call = if unsafety.is_some() {
+    let implementation_call = if matches!(unsafety, syn::Safety::Unsafe(_)) {
         quote! { unsafe { #implementation_call } }
     } else {
         implementation_call

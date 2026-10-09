@@ -355,7 +355,7 @@ impl RankPolyOpSpec {
             }
         }
 
-        let is_unsafe = item.sig.unsafety.is_some();
+        let is_unsafe = matches!(item.sig.safety, syn::Safety::Unsafe(_));
 
         Ok(Self {
             fn_ident,
@@ -1930,7 +1930,7 @@ fn emit_variadic_trait_impl_for_rank(
 
     // Trait reference: substitute each CGA position with its rank-instance
     // concrete type (shape-bound → arg type; free → return type).
-    let (_, trait_path_orig, _) = item.trait_.as_ref().unwrap();
+    let (trait_path_orig, _) = item.trait_.as_ref().unwrap();
     let trait_path = rewrite_trait_path_args_for_rank(
         trait_path_orig,
         cgas,

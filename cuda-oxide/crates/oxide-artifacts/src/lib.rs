@@ -790,7 +790,8 @@ fn build_host_object_with_section(
     let section = object.section_mut(section_id);
     section.set_data(section_data.to_vec(), 8);
     section.flags = SectionFlags::Elf {
-        sh_flags: elf::SHF_ALLOC | elf::SHF_GNU_RETAIN,
+        sh_type: object::elf::SHT_PROGBITS,
+        sh_flags: object::elf::SHF_ALLOC | object::elf::SHF_GNU_RETAIN,
     };
 
     for (anchor_symbol, weak) in anchor_symbols {
@@ -850,12 +851,6 @@ impl HostObjectTarget {
             endianness,
         })
     }
-}
-
-#[cfg(feature = "object-write")]
-mod elf {
-    pub const SHF_ALLOC: u64 = 0x2;
-    pub const SHF_GNU_RETAIN: u64 = 0x20_0000;
 }
 
 fn validate_spec(spec: &ArtifactBundleSpec<'_>) -> Result<(), ArtifactError> {

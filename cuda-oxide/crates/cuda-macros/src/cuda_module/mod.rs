@@ -656,7 +656,11 @@ fn cuda_module_kernel(
     // device accessibility or synchronization of values reached through its
     // fields. Keep that proof at the host launch boundary for every grid
     // parameter, including generic and otherwise safe source kernels.
-    let launch_unsafety = item_fn.sig.unsafety.or_else(|| {
+    let source_unsafety = match item_fn.sig.safety {
+        syn::Safety::Unsafe(token) => Some(token),
+        _ => None,
+    };
+    let launch_unsafety = source_unsafety.or_else(|| {
         params
             .iter()
             .any(|parameter| parameter.grid_constant)

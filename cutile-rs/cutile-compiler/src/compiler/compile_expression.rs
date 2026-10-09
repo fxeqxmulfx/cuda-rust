@@ -78,6 +78,7 @@ impl<'m> CUDATileFunctionCompiler<'m> {
     /// consumed by `resolve_static_params` during op compilation.
     fn make_zst_marker(path_expr: &syn::ExprPath) -> TileRustValue {
         let path_ty: syn::Type = syn::Type::Path(syn::TypePath {
+            attrs: Vec::new(),
             qself: None,
             path: path_expr.path.clone(),
         });

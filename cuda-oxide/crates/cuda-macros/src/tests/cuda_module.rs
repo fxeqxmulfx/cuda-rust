@@ -129,7 +129,10 @@ fn grid_constant_launch_safety_is_independent_of_source_safety_and_geometry() {
                 _ => None,
             })
             .expect("source kernel is preserved");
-        assert!(source.sig.unsafety.is_none(), "{name}");
+        assert!(
+            !matches!(source.sig.safety, syn::Safety::Unsafe(_)),
+            "{name}"
+        );
     }
     let mut checked = 0;
     for item in items {
@@ -146,7 +149,7 @@ fn grid_constant_launch_safety_is_independent_of_source_safety_and_geometry() {
                 .any(|prefix| name == *prefix || name.starts_with(&format!("{prefix}_")))
             {
                 assert!(
-                    method.sig.unsafety.is_some(),
+                    matches!(method.sig.safety, syn::Safety::Unsafe(_)),
                     "{name} must require a host proof"
                 );
                 let docs = method
@@ -184,7 +187,7 @@ fn grid_constant_launch_safety_is_independent_of_source_safety_and_geometry() {
                 "ordinary" | "ordinary_async" | "ordinary_async_owned"
             ) {
                 assert!(
-                    method.sig.unsafety.is_none(),
+                    !matches!(method.sig.safety, syn::Safety::Unsafe(_)),
                     "ordinary scalar policy is unchanged"
                 );
             }

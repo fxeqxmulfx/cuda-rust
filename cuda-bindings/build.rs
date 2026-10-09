@@ -15,7 +15,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
     Expr, Fields, File, GenericArgument, Item, ItemStruct, PathArguments, ReturnType, Type,
-    TypeBareFn,
+    TypeFnPtr,
 };
 
 const MIN_CUDA_VERSION: u32 = 13000;
@@ -478,7 +478,7 @@ fn generate_field_shims(
     }
 }
 
-fn result_bare_fn(ty: &Type) -> Option<&TypeBareFn> {
+fn result_bare_fn(ty: &Type) -> Option<&TypeFnPtr> {
     let Type::Path(type_path) = ty else {
         return None;
     };
@@ -489,7 +489,7 @@ fn result_bare_fn(ty: &Type) -> Option<&TypeBareFn> {
     let PathArguments::AngleBracketed(args) = &segment.arguments else {
         return None;
     };
-    let Some(GenericArgument::Type(Type::BareFn(bare_fn))) = args.args.first() else {
+    let Some(GenericArgument::Type(Type::FnPtr(bare_fn))) = args.args.first() else {
         return None;
     };
     Some(bare_fn)

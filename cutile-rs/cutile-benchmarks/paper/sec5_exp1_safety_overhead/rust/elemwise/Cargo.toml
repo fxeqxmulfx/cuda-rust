@@ -10,11 +10,11 @@ name = "elemwise_rust"
 path = "src/main.rs"
 
 [dependencies]
-cuda-core = "0.2.0"
-cuda-async = "0.2.0"
-cutile = "0.2.0"
-cutile-macro = "0.2.0"
-cutile-compiler = "0.2.0"
+cuda-core = "0.4.0"
+cuda-async = "0.4.0"
+cutile = "0.4.0"
+cutile-macro = "0.4.0"
+cutile-compiler = "0.4.0"
 
 [profile.release]
 opt-level = 3

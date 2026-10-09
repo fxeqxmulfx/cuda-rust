@@ -8,7 +8,7 @@ use mir::{
     tyctxt::{AdtMeta, TyCtxt},
 };
 use rand::{
-    Rng,
+    Rng, RngExt,
     seq::{IteratorRandom, SliceRandom},
 };
 use rand_distr::{Distribution, Poisson, weighted::WeightedIndex};
@@ -154,7 +154,7 @@ fn new_adt(tcx: &mut TyCtxt, rng: &mut impl Rng) {
             let field_tys = tcx
                 .indices()
                 .filter(|ty| *ty != TyCtxt::UNIT && /* https://github.com/rust-lang/rust/issues/119940 */ !ty.contains(&tcx, |tcx, ty| ty.is_ref(tcx)))
-                .choose_multiple(rng, field_count);
+                .sample(rng, field_count);
             VariantDef {
                 fields: IndexVec::from_iter(field_tys.into_iter()),
             }

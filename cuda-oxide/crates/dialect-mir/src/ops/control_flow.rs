@@ -178,9 +178,17 @@ impl Verify for MirGotoOp {
 
 #[op_interface_impl]
 impl BranchOpInterface for MirGotoOp {
-    fn successor_operands(&self, ctx: &Context, succ_idx: usize) -> Vec<Value> {
+    fn verify_successor_operand_layout(&self, ctx: &Context) -> Result<(), Error> {
+        let op = self.get_operation().deref(ctx);
+        if op.get_num_successors() != 1 {
+            return verify_err!(op.loc(), "MirGotoOp must have exactly 1 successor");
+        }
+        Ok(())
+    }
+
+    fn successor_operand_range(&self, ctx: &Context, succ_idx: usize) -> std::ops::Range<usize> {
         assert!(succ_idx == 0, "MirGotoOp has exactly one successor");
-        self.get_operation().deref(ctx).operands().collect()
+        0..self.get_operation().deref(ctx).get_num_operands()
     }
 
     fn add_successor_operand(&self, ctx: &mut Context, succ_idx: usize, operand: Value) -> usize {
@@ -224,7 +232,7 @@ impl BranchOpInterface for MirGotoOp {
 #[pliron_op(
     name = "mir.cond_br",
     format,
-    interfaces = [NResultsInterface<0>, IsTerminatorInterface, OperandSegmentInterface]
+    interfaces = [NResultsInterface<0>, IsTerminatorInterface]
 )]
 pub struct MirCondBranchOp;
 
@@ -301,14 +309,37 @@ impl Verify for MirCondBranchOp {
 }
 
 #[op_interface_impl]
+impl OperandSegmentInterface for MirCondBranchOp {
+    fn expected_num_segments(&self, _ctx: &Context) -> Option<usize> {
+        // The condition, true destination operands, and false destination operands.
+        Some(3)
+    }
+}
+
+#[op_interface_impl]
 impl BranchOpInterface for MirCondBranchOp {
-    fn successor_operands(&self, ctx: &Context, succ_idx: usize) -> Vec<Value> {
+    fn verify_successor_operand_layout(&self, ctx: &Context) -> Result<(), Error> {
+        <Self as OperandSegmentInterface>::verify(self, ctx)?;
+        let op = self.get_operation().deref(ctx);
+        if op.get_num_successors() != 2 {
+            return verify_err!(op.loc(), "MirCondBranchOp must have exactly 2 successors");
+        }
+        if self.segment_size(ctx, 0) != 1 {
+            return verify_err!(
+                op.loc(),
+                "MirCondBranchOp condition segment must contain 1 operand"
+            );
+        }
+        Ok(())
+    }
+
+    fn successor_operand_range(&self, ctx: &Context, succ_idx: usize) -> std::ops::Range<usize> {
         assert!(
             succ_idx == 0 || succ_idx == 1,
             "MirCondBranchOp has exactly two successors"
         );
         // Segment 0 = condition, segment 1 = true args, segment 2 = false args
-        self.get_segment(ctx, succ_idx + 1)
+        self.segment_range(ctx, succ_idx + 1)
     }
 
     fn add_successor_operand(&self, ctx: &mut Context, succ_idx: usize, operand: Value) -> usize {

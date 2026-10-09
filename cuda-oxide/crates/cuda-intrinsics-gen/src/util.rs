@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {

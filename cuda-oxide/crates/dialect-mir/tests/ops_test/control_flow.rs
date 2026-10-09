@@ -7,8 +7,8 @@ use dialect_mir::ops::{MirAssertOp, MirCondBranchOp, MirFuncOp, MirGotoOp, MirRe
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        attributes::TypeAttr,
-        op_interfaces::OperandSegmentInterface,
+        attributes::{OperandSegmentSizesAttr, TypeAttr},
+        op_interfaces::{BranchOpInterface, OperandSegmentInterface},
         types::{FP32Type, FunctionType, IntegerType, Signedness},
     },
     common_traits::Verify,
@@ -170,4 +170,74 @@ fn test_mir_control_flow_verify() {
             "Assertions must have exactly one condition and no successors"
         );
     }
+}
+
+#[test]
+fn branch_operand_layout_rejects_malformed_ir_and_preserves_edge_ranges() {
+    let mut ctx = Context::new();
+    dialect_mir::register(&mut ctx);
+    let i32_ty = IntegerType::get(&ctx, 32, Signedness::Signed);
+    let i1_ty = IntegerType::get(&ctx, 1, Signedness::Signless);
+    let source = BasicBlock::new(&mut ctx, None, vec![i1_ty.into(), i32_ty.into()]);
+    let condition = source.deref(&ctx).get_argument(0);
+    let value = source.deref(&ctx).get_argument(1);
+    let target = BasicBlock::new(&mut ctx, None, vec![i32_ty.into()]);
+
+    let goto = Operation::new(
+        &mut ctx,
+        MirGotoOp::get_concrete_op_info(),
+        vec![],
+        vec![value],
+        vec![target],
+        0,
+    );
+    let goto = MirGotoOp::new(goto);
+    assert!(goto.verify_successor_operand_layout(&ctx).is_ok());
+    assert_eq!(goto.successor_operand_range(&ctx, 0), 0..1);
+    assert_eq!(goto.successor_operands(&ctx, 0), vec![value]);
+
+    for successors in [vec![], vec![target, target]] {
+        let malformed = Operation::new(
+            &mut ctx,
+            MirGotoOp::get_concrete_op_info(),
+            vec![],
+            vec![value],
+            successors,
+            0,
+        );
+        assert!(
+            MirGotoOp::new(malformed)
+                .verify_successor_operand_layout(&ctx)
+                .is_err()
+        );
+    }
+
+    let branch = Operation::new(
+        &mut ctx,
+        MirCondBranchOp::get_concrete_op_info(),
+        vec![],
+        vec![condition, value, value],
+        vec![target, target],
+        0,
+    );
+    let branch = MirCondBranchOp::new(branch);
+    // Missing and malformed segment attributes must return errors before
+    // the interface tries to index them.
+    assert!(branch.verify_successor_operand_layout(&ctx).is_err());
+    for sizes in [vec![1, 2], vec![1, 1, 0], vec![0, 2, 1], vec![2, 0, 1]] {
+        branch.set_operand_segment_sizes(&ctx, OperandSegmentSizesAttr(sizes));
+        assert!(branch.verify_successor_operand_layout(&ctx).is_err());
+    }
+    branch.set_operand_segment_sizes(&ctx, OperandSegmentSizesAttr(vec![1, 1, 1]));
+    assert!(branch.verify_successor_operand_layout(&ctx).is_ok());
+    assert_eq!(branch.successor_operand_range(&ctx, 0), 1..2);
+    assert_eq!(branch.successor_operand_range(&ctx, 1), 2..3);
+    assert_eq!(branch.successor_operands(&ctx, 0), vec![value]);
+    assert_eq!(branch.successor_operands(&ctx, 1), vec![value]);
+
+    assert_eq!(branch.add_successor_operand(&mut ctx, 0, value), 1);
+    assert_eq!(branch.successor_operand_range(&ctx, 1), 3..4);
+    assert_eq!(branch.remove_successor_operand(&mut ctx, 0, 1), value);
+    assert_eq!(branch.successor_operand_range(&ctx, 1), 2..3);
+    assert_eq!(branch.get_operation().deref(&ctx).get_operand(0), condition);
 }

@@ -476,6 +476,7 @@ fn expr_path_from_type_path(type_path: &TypePath) -> Expr {
 fn generic_arg_from_const_expr(expr: &Expr) -> GenericArgument {
     if let Expr::Path(path) = expr {
         return GenericArgument::Type(Type::Path(TypePath {
+            attrs: Vec::new(),
             qself: path.qself.clone(),
             path: path.path.clone(),
         }));

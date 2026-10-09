@@ -509,8 +509,8 @@ pub fn generate_kernel_launcher(
     ),
     Error,
 > {
-    let unsafety = item.sig.unsafety;
-    let is_unsafe = unsafety.is_some();
+    let unsafety = &item.sig.safety;
+    let is_unsafe = matches!(unsafety, syn::Safety::Unsafe(_));
     let launcher_ident = Ident::new(launcher_name, Span::call_site());
     let mut launcher_method = syn::parse2::<ImplItemFn>(quote! {
         unsafe fn execute(mut self, ctx: &ExecutionContext) -> Result<<Self as DeviceOp>::Output, DeviceError> {}

@@ -70,11 +70,12 @@ fn standalone_launch_contract_validates_requires_against_fn_signature() {
         "domain = 1, block = (64, 1, 1), requires = (input.len() >= n, output.len() >= n)",
     )
     .unwrap();
-    assert!(validate_requires_relations(&good.requires, &params).is_ok());
+    assert!(validate_requires_relations(&good.requires, &params, &kernel.sig.generics).is_ok());
 
     let typo: LaunchContractArgs =
         syn::parse_str("domain = 1, block = (64, 1, 1), requires = (input.len() >= m)").unwrap();
-    let error = validate_requires_relations(&typo.requires, &params).unwrap_err();
+    let error =
+        validate_requires_relations(&typo.requires, &params, &kernel.sig.generics).unwrap_err();
     assert!(
         error.to_string().contains("unknown identifier `m`"),
         "{error}"
@@ -104,7 +105,8 @@ fn standalone_requires_models_unmarshallable_params_as_opaque_scalars() {
     let params = standalone_requires_params(&kernel).unwrap();
     let args: LaunchContractArgs =
         syn::parse_str("domain = 1, block = (64, 1, 1), requires = (n >= flag)").unwrap();
-    let error = validate_requires_relations(&args.requires, &params).unwrap_err();
+    let error =
+        validate_requires_relations(&args.requires, &params, &kernel.sig.generics).unwrap_err();
     assert!(
         error.to_string().contains("not an unsigned integer scalar"),
         "{error}"
@@ -504,4 +506,27 @@ fn non_generic_launches_keep_the_plain_lookup_panic() {
         "{expanded}"
     );
     assert!(expanded.contains("Failedtoloadkernel"), "{expanded}");
+}
+
+#[test]
+fn requires_accepts_unsigned_const_parameters_and_rejects_other_types() {
+    let relation: LaunchContractArgs =
+        syn::parse_str("domain = 1, block = (64, 1, 1), requires = (input.len() >= N * 2)")
+            .unwrap();
+    for ty in ["u8", "u16", "u32", "u64", "usize", "i32", "u128", "bool"] {
+        let kernel: ItemFn =
+            syn::parse_str(&format!("pub fn sized<const N: {ty}>(input: &[f32]) {{}}")).unwrap();
+        let params = standalone_requires_params(&kernel).unwrap();
+        let result = validate_requires_relations(&relation.requires, &params, &kernel.sig.generics);
+        assert_eq!(
+            result.is_ok(),
+            ["u8", "u16", "u32", "u64", "usize"].contains(&ty),
+            "{ty}"
+        );
+    }
+    let kernel: ItemFn = parse_quote! { pub fn sized<const M: usize>(input: &[f32]) {} };
+    let params = standalone_requires_params(&kernel).unwrap();
+    assert!(
+        validate_requires_relations(&relation.requires, &params, &kernel.sig.generics).is_err()
+    );
 }

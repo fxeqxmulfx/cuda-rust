@@ -44,7 +44,9 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
     // wrapper, whose synthetic parameter names cannot resolve source-level
     // `requires` identifiers, so those relations are validated here while the
     // original signature is still in scope.
-    if let Err(error) = validate_routed_launch_contract_requires(&input.attrs, &entry_inputs) {
+    if let Err(error) =
+        validate_routed_launch_contract_requires(&input.attrs, &entry_inputs, &input.sig.generics)
+    {
         return error.to_compile_error();
     }
     let has_explicit_scope = explicit_scope.is_some();
@@ -498,7 +500,9 @@ pub(crate) fn generic_kernel_instantiation_tokens(
     // Same as the no-instantiation path: `requires` relations of a routed
     // `#[launch_contract]` must be validated against the source parameter
     // names before they are lost to the generated wrappers.
-    if let Err(error) = validate_routed_launch_contract_requires(&input.attrs, &entry_inputs) {
+    if let Err(error) =
+        validate_routed_launch_contract_requires(&input.attrs, &entry_inputs, &input.sig.generics)
+    {
         return error.to_compile_error();
     }
     let has_explicit_scope = explicit_scope.is_some();

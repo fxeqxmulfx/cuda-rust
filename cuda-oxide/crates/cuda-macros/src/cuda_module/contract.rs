@@ -8,7 +8,7 @@
 
 use crate::common::{attr_path_ends_with, internal_ident};
 use crate::cuda_module::model::{
-    CudaModuleKernel, CudaModuleParam, CudaModuleParamMarshal, ScalarIntClass,
+    CudaModuleKernel, CudaModuleParam, CudaModuleParamMarshal, ScalarIntClass, scalar_int_class,
 };
 use crate::launch_attrs::{ClusterArgs, ConstU32Expr, LaunchBoundsArgs};
 use proc_macro2::TokenStream as TokenStream2;
@@ -35,7 +35,7 @@ pub(super) struct CudaModuleLaunchContract {
     pub(super) dynamic_shared: DynamicSharedContract,
     pub(super) dynamic_shared_alignment: u32,
     pub(super) min_compute_capability: (u32, u32),
-    /// Size requirements over the kernel's own parameters, validated
+    /// Size requirements over the kernel's arguments and unsigned const parameters, validated
     /// against the parameter list at expansion time. Each relation becomes an
     /// overflow-safe host-side check in every checked launcher.
     pub(super) requires: Vec<Expr>,
@@ -298,6 +298,7 @@ pub(super) fn cuda_module_launch_contract(
     attrs: &[syn::Attribute],
     _fn_name: &Ident,
     params: &[CudaModuleParam],
+    generics: &syn::Generics,
     cluster_dim: Option<(u32, u32, u32)>,
 ) -> syn::Result<Option<CudaModuleLaunchContract>> {
     let contract_attrs: Vec<_> = attrs
@@ -363,7 +364,7 @@ pub(super) fn cuda_module_launch_contract(
         _ => args.min_compute_capability,
     };
 
-    validate_requires_relations(&args.requires, params)?;
+    validate_requires_relations(&args.requires, params, generics)?;
 
     Ok(Some(CudaModuleLaunchContract {
         domain: args.domain,
@@ -417,6 +418,7 @@ fn requires_grammar_help(params: &[CudaModuleParam]) -> String {
 pub(crate) fn validate_requires_relations(
     relations: &[Expr],
     params: &[CudaModuleParam],
+    generics: &syn::Generics,
 ) -> syn::Result<()> {
     for relation in relations {
         let Expr::Binary(binary) = relation else {
@@ -437,8 +439,8 @@ pub(crate) fn validate_requires_relations(
                 ),
             ));
         }
-        validate_requires_operand(&binary.left, params)?;
-        validate_requires_operand(&binary.right, params)?;
+        validate_requires_operand(&binary.left, params, generics)?;
+        validate_requires_operand(&binary.right, params, generics)?;
     }
     Ok(())
 }
@@ -464,8 +466,12 @@ fn requires_arithmetic_op(op: &syn::BinOp) -> bool {
 
 /// Validates one side of a `requires` comparison: an arithmetic expression
 /// over `.len()` of slice-like parameters, unsigned integer scalar
-/// parameters, and integer literals.
-fn validate_requires_operand(expr: &Expr, params: &[CudaModuleParam]) -> syn::Result<()> {
+/// parameters, unsigned integer const parameters, and integer literals.
+fn validate_requires_operand(
+    expr: &Expr,
+    params: &[CudaModuleParam],
+    generics: &syn::Generics,
+) -> syn::Result<()> {
     match expr {
         Expr::Lit(literal) => match &literal.lit {
             syn::Lit::Int(int) => {
@@ -493,6 +499,19 @@ fn validate_requires_operand(expr: &Expr, params: &[CudaModuleParam]) -> syn::Re
                 ));
             };
             let Some(param) = params.iter().find(|param| param.name == *ident) else {
+                if let Some(constant) = generics.const_params().find(|param| param.ident == *ident)
+                {
+                    return if scalar_int_class(&constant.ty) == ScalarIntClass::Unsigned {
+                        Ok(())
+                    } else {
+                        Err(syn::Error::new_spanned(
+                            path,
+                            format!(
+                                "const parameter `{ident}` in requires must have an unsigned integer type no wider than u64"
+                            ),
+                        ))
+                    };
+                }
                 return Err(syn::Error::new_spanned(
                     path,
                     format!(
@@ -590,11 +609,11 @@ fn validate_requires_operand(expr: &Expr, params: &[CudaModuleParam]) -> syn::Re
                 )),
             }
         }
-        Expr::Paren(paren) => validate_requires_operand(&paren.expr, params),
-        Expr::Group(group) => validate_requires_operand(&group.expr, params),
+        Expr::Paren(paren) => validate_requires_operand(&paren.expr, params, generics),
+        Expr::Group(group) => validate_requires_operand(&group.expr, params, generics),
         Expr::Binary(binary) if requires_arithmetic_op(&binary.op) => {
-            validate_requires_operand(&binary.left, params)?;
-            validate_requires_operand(&binary.right, params)
+            validate_requires_operand(&binary.left, params, generics)?;
+            validate_requires_operand(&binary.right, params, generics)
         }
         Expr::Binary(binary) if requires_comparison_op(&binary.op) => Err(syn::Error::new_spanned(
             binary,
@@ -732,7 +751,7 @@ fn requires_operand_tokens(
             quote! { #value }
         }
         Expr::Path(path) => {
-            // Validated: a bare unsigned integer scalar parameter, so `as
+            // Validated: an unsigned integer scalar or const parameter, so `as
             // u64` is a lossless widening.
             quote! { (#path as u64) }
         }

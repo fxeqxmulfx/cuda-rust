@@ -62,7 +62,8 @@ pub(crate) fn launch_contract_entry(attr: TokenStream, item: TokenStream) -> Tok
     // stack duplicate diagnostics.
     if !args.requires.is_empty()
         && let Some(params) = standalone_requires_params(&input)
-        && let Err(error) = validate_requires_relations(&args.requires, &params)
+        && let Err(error) =
+            validate_requires_relations(&args.requires, &params, &input.sig.generics)
     {
         return error.to_compile_error().into();
     }
@@ -140,6 +141,7 @@ fn requires_params_from_inputs(
 pub(crate) fn validate_routed_launch_contract_requires(
     attrs: &[syn::Attribute],
     source_inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
+    generics: &syn::Generics,
 ) -> syn::Result<()> {
     for attr in attrs {
         if !attr_path_ends_with(attr, "launch_contract") {
@@ -152,7 +154,7 @@ pub(crate) fn validate_routed_launch_contract_requires(
             continue;
         }
         if let Some(params) = requires_params_from_inputs(source_inputs) {
-            validate_requires_relations(&args.requires, &params)?;
+            validate_requires_relations(&args.requires, &params, generics)?;
         }
     }
     Ok(())

@@ -627,8 +627,13 @@ fn cuda_module_kernel(
     let cluster_dim = cuda_module_cluster_dim(&item_fn.attrs)?;
     let cooperative = cuda_module_cooperative(&item_fn.attrs)?;
     let params = cuda_module_params(item_fn)?;
-    let launch_contract =
-        cuda_module_launch_contract(&item_fn.attrs, &item_fn.sig.ident, &params, cluster_dim)?;
+    let launch_contract = cuda_module_launch_contract(
+        &item_fn.attrs,
+        &item_fn.sig.ident,
+        &params,
+        &item_fn.sig.generics,
+        cluster_dim,
+    )?;
     // `#[cuda_module]` expands before both the nested function attributes and
     // the recursive module rewrite. Mirror the evaluatability predicates that
     // `#[launch_bounds]` and `#[kernel]` add to each concrete entry while

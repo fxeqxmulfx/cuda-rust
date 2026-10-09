@@ -3,7 +3,8 @@
 
 #![allow(dead_code)]
 
-use cuda_core::{CudaStream, DeviceBuffer, LaunchConfig1D};
+use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig1D};
+use std::sync::Arc;
 
 #[cuda_host::cuda_module]
 mod sized {
@@ -30,6 +31,10 @@ mod sized {
     input.len() >= N, output.len() >= N))]
 pub fn standalone<const N: u32>(input: &[f32], mut output: cuda_device::DisjointSlice<f32>) {
     let _ = (input, &mut output);
+}
+
+fn load_embedded(context: &Arc<CudaContext>) -> Result<sized::LoadedModule, cuda_host::EmbeddedModuleError> {
+    sized::load(context)
 }
 
 fn checked_launch(

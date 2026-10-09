@@ -33,6 +33,10 @@ pub enum EmbeddedModuleError {
     #[error("embedded CUDA module '{name}' was not found")]
     ModuleNotFound { name: String },
 
+    /// The compiler did not retain an anchor for this module's mapped image.
+    #[error("no compiler-owned CUDA artifact anchor is available for this module")]
+    NoArtifactAnchor,
+
     /// No embedded bundles with loadable payloads were found.
     #[error("no embedded CUDA modules were found")]
     NoModules,
@@ -44,6 +48,14 @@ pub enum EmbeddedModuleError {
     /// PTX source could not be parsed or edited safely while merging bundles.
     #[error("embedded CUDA module '{name}' contains invalid PTX: {reason}")]
     InvalidPtx { name: String, reason: String },
+
+    /// More than one bundle defines the same kernel entry.
+    #[error("kernel entry '{entry}' is defined by both embedded modules '{first}' and '{second}'")]
+    ConflictingEntry {
+        entry: String,
+        first: String,
+        second: String,
+    },
 
     /// NVVM IR or LTOIR payload compilation failed.
     #[error("failed to build embedded CUDA module: {0}")]
@@ -135,7 +147,31 @@ pub fn load_all_ptx_bundles_merged(
     ctx: &Arc<CudaContext>,
 ) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
     let bundles = artifact_bundles_from_current_exe()?;
-    let merged = merge_ptx_bundles(&bundles)?;
+    load_merged_ptx_bundles(ctx, &bundles)
+}
+
+/// Merge compiler-embedded PTX from the original image containing `anchor`.
+///
+/// Typed generic module loaders use their compiler-owned anchor, retaining
+/// library specializations and checking the mapped file's identity before
+/// reading any payload. No caller-selected path or replacement image is used.
+/// All required specializations must be linked into the same image. This
+/// requires readable Linux or Android procfs; unsupported or unavailable
+/// provenance fails loading instead of falling back to another binary.
+#[doc(hidden)]
+pub fn load_all_ptx_bundles_merged_from_anchor(
+    ctx: &Arc<CudaContext>,
+    anchor: &u8,
+) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
+    let bundles = artifact_bundles_containing(anchor)?;
+    load_merged_ptx_bundles(ctx, &bundles)
+}
+
+fn load_merged_ptx_bundles(
+    ctx: &Arc<CudaContext>,
+    bundles: &[OwnedArtifactBundle],
+) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
+    let merged = merge_ptx_bundles(bundles)?;
 
     let module = ctx.load_module_from_image(merged.as_bytes())?;
     // Retain the merged module's `.entry` names (a few dozen bytes per
@@ -156,44 +192,62 @@ pub fn load_all_ptx_bundles_merged(
 /// and examples can check order-dependent merge properties: module-scope
 /// symbol uniqueness and extern alignment must hold for every bundle order,
 /// not just the one the current executable happens to embed (#1277).
+/// Non-extern device helpers and compiler reflection strings are renamed within
+/// their bundle; explicit device extern link names and kernel identities remain.
+/// Duplicate kernel definitions, including identical definitions, are rejected
+/// before invoking the driver; typed loaders require an unambiguous entry.
 pub fn merge_ptx_bundles<'a>(
     bundles: impl IntoIterator<Item = &'a OwnedArtifactBundle>,
 ) -> Result<String, EmbeddedModuleError> {
-    let mut merged = String::new();
-    let mut found_any = false;
-
-    // Keep each bundle's debug file indices distinct in the merged module.
-    let mut file_index_offset = 0;
-
+    let mut sources = Vec::new();
+    let mut state = PtxMergeState::default();
     for bundle in bundles {
-        if let Some(ptx_bytes) = bundle.payload(ArtifactPayloadKind::Ptx) {
-            let ptx_str = std::str::from_utf8(ptx_bytes)
+        if let Some(bytes) = bundle.payload(ArtifactPayloadKind::Ptx) {
+            let source = std::str::from_utf8(bytes)
                 .map_err(|_| EmbeddedModuleError::UnsupportedPayload {
                     name: bundle.name.clone(),
                 })?
                 .trim_end_matches('\0');
-
-            let strip_headers = found_any;
-            let (body, max_file_index) =
-                prepare_bundle_body(ptx_str, strip_headers, file_index_offset).map_err(
-                    |reason| EmbeddedModuleError::InvalidPtx {
-                        name: bundle.name.clone(),
-                        reason,
-                    },
-                )?;
-            file_index_offset = file_index_offset.max(max_file_index);
-            merged.push_str(&body);
-            if !body.ends_with('\n') {
-                merged.push('\n');
+            let document = ptx_parse::Document::parse(source).map_err(|error| {
+                EmbeddedModuleError::InvalidPtx {
+                    name: bundle.name.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+            // Explicit device externs keep their link names across bundles.
+            // Every other helper belongs to the artifact that compiled it.
+            for callable in document.callables() {
+                if callable.kind() == ptx_parse::CallableKind::Function && callable.is_extern() {
+                    state.extern_functions.insert(callable.name().to_string());
+                }
             }
-            found_any = true;
+            sources.push((bundle.name.as_str(), source));
         }
     }
-
-    if !found_any {
+    if sources.is_empty() {
         return Err(EmbeddedModuleError::NoModules);
     }
+
+    let mut merged = String::new();
+    let mut file_index_offset = 0;
+    for (index, (name, source)) in sources.into_iter().enumerate() {
+        state.bundle_index = index;
+        let (body, max_file_index) =
+            prepare_bundle_body(source, index != 0, file_index_offset, name, &mut state)?;
+        file_index_offset = file_index_offset.max(max_file_index);
+        merged.push_str(&body);
+        if !body.ends_with('\n') {
+            merged.push('\n');
+        }
+    }
     Ok(merged)
+}
+
+#[derive(Default)]
+struct PtxMergeState {
+    entries: std::collections::BTreeMap<String, String>,
+    extern_functions: std::collections::BTreeSet<String>,
+    bundle_index: usize,
 }
 
 /// Strip repeated headers and shift debug indices past the previous bundles.
@@ -202,17 +256,66 @@ fn prepare_bundle_body(
     ptx: &str,
     strip_headers: bool,
     file_index_offset: u64,
-) -> Result<(String, u64), String> {
-    let document = ptx_parse::Document::parse(ptx).map_err(|error| error.to_string())?;
+    bundle_name: &str,
+    state: &mut PtxMergeState,
+) -> Result<(String, u64), EmbeddedModuleError> {
+    let invalid_ptx = |reason: String| EmbeddedModuleError::InvalidPtx {
+        name: bundle_name.to_string(),
+        reason,
+    };
+    let document =
+        ptx_parse::Document::parse(ptx).map_err(|error| invalid_ptx(error.to_string()))?;
+    for callable in document.callables() {
+        if callable.kind() == ptx_parse::CallableKind::Entry
+            && callable.body_span().is_some()
+            && let Some(first) = state
+                .entries
+                .insert(callable.name().to_string(), bundle_name.to_string())
+        {
+            return Err(EmbeddedModuleError::ConflictingEntry {
+                entry: callable.name().to_string(),
+                first,
+                second: bundle_name.to_string(),
+            });
+        }
+    }
     let mut edits = ptx_parse::EditScript::new();
     let mut max_file_index = 0u64;
+
+    // Independently compiled artifacts can contain the same device helper and
+    // NVVM reflection string. Keep definitions and all references artifact-local
+    // without changing kernel entry identities or explicit extern link names.
+    let prefix = format!("cuda_oxide_merge_{}_", state.bundle_index);
+    let mut local_symbols = std::collections::BTreeMap::new();
+    for callable in document.callables() {
+        if callable.kind() == ptx_parse::CallableKind::Function
+            && callable.body_span().is_some()
+            && !state.extern_functions.contains(callable.name())
+        {
+            local_symbols.insert(callable.name(), format!("{prefix}{}", callable.name()));
+        }
+    }
+    for token in document.tokens() {
+        if token.kind() == ptx_parse::TokenKind::Word && token.text(ptx).starts_with("_$_str") {
+            local_symbols.insert(token.text(ptx), format!("{prefix}{}", token.text(ptx)));
+        }
+    }
+    for token in document.tokens() {
+        if token.kind() == ptx_parse::TokenKind::Word
+            && let Some(replacement) = local_symbols.get(token.text(ptx))
+        {
+            edits
+                .replace(token.span(), replacement)
+                .map_err(|error| invalid_ptx(error.to_string()))?;
+        }
+    }
 
     for directive in document.directives() {
         match directive.name() {
             ".version" | ".target" | ".address_size" if strip_headers => {
                 edits
                     .delete(directive.line_span())
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| invalid_ptx(error.to_string()))?;
             }
             ".file" | ".loc" => {
                 let span = directive.arguments_span();
@@ -228,7 +331,8 @@ fn prepare_bundle_body(
                     ptx,
                     arguments.first().copied(),
                     file_index_offset,
-                )?;
+                )
+                .map_err(invalid_ptx)?;
                 max_file_index = max_file_index.max(index);
                 if directive.name() == ".loc" {
                     for (position, attribute) in arguments.windows(2).enumerate() {
@@ -238,7 +342,8 @@ fn prepare_bundle_body(
                                 ptx,
                                 arguments.get(position + 2).copied(),
                                 file_index_offset,
-                            )?;
+                            )
+                            .map_err(invalid_ptx)?;
                             max_file_index = max_file_index.max(index);
                         }
                     }
@@ -248,7 +353,9 @@ fn prepare_bundle_body(
         }
     }
 
-    let body = edits.apply(ptx).map_err(|error| error.to_string())?;
+    let body = edits
+        .apply(ptx)
+        .map_err(|error| invalid_ptx(error.to_string()))?;
     Ok((body, max_file_index))
 }
 
@@ -414,6 +521,111 @@ mod tests {
         }
     }
 
+    #[test]
+    fn keeps_helper_definitions_and_reflection_strings_local_to_each_bundle() {
+        let source = |entry: &str| {
+            format!(
+                ".version 8.9\n.target sm_80\n.address_size 64\n.global .align 1 .b8 _$_str[2] = {{ 1, 0 }};\n// helper _$_str is a comment\n.file 1 \"helper _$_str\"\n.visible .func helper() {{ ret; }}\n.visible .entry {entry}() {{ call helper, (); mov.u64 %rd1, _$_str; ret; }}\n"
+            )
+        };
+        let first = ptx_bundle("library", &source("first"));
+        let second = ptx_bundle("binary", &source("second"));
+        for (a, b) in [(&first, &second), (&second, &first)] {
+            let merged = merge_ptx_bundles([a, b]).unwrap();
+            for index in 0..2 {
+                assert!(merged.contains(&format!(".func cuda_oxide_merge_{index}_helper()")));
+                assert!(merged.contains(&format!("call cuda_oxide_merge_{index}_helper, ()")));
+                assert!(merged.contains(&format!(".b8 cuda_oxide_merge_{index}__$_str[2]")));
+                assert!(merged.contains(&format!("mov.u64 %rd1, cuda_oxide_merge_{index}__$_str")));
+            }
+            assert!(merged.contains(".entry first()"));
+            assert!(merged.contains(".entry second()"));
+            assert_eq!(merged.matches("// helper _$_str is a comment").count(), 2);
+            assert_eq!(merged.matches("\"helper _$_str\"").count(), 2);
+        }
+    }
+
+    #[test]
+    fn preserves_explicit_device_extern_link_names_across_bundles() {
+        let first = ptx_bundle(
+            "caller",
+            ".version 8.9\n.target sm_80\n.address_size 64\n.extern .func exported();\n.visible .entry caller() { call exported, (); ret; }\n",
+        );
+        let second = ptx_bundle(
+            "provider",
+            ".version 8.9\n.target sm_80\n.address_size 64\n.visible .func exported() { ret; }\n.visible .entry provider() { ret; }\n",
+        );
+        for bundles in [[&first, &second], [&second, &first]] {
+            let merged = merge_ptx_bundles(bundles).unwrap();
+            assert!(merged.contains(".extern .func exported()"));
+            assert!(merged.contains(".visible .func exported()"));
+            assert!(merged.contains("call exported, ()"));
+            assert!(!merged.contains("_exported"));
+        }
+    }
+
+    #[test]
+    fn rejects_conflicting_entry_definitions_in_either_bundle_order() {
+        let name = "copy_TID_0123456789abcdef0123456789abcdef";
+        let first = ptx_bundle(
+            "library",
+            &format!(
+                ".version 8.9\n.target sm_80\n.address_size 64\n.visible .entry {name}() {{ ret; }}\n"
+            ),
+        );
+        let second = ptx_bundle(
+            "binary",
+            &format!(
+                ".version 8.9\n.target sm_80\n.address_size 64\n.visible .entry {name}(.param .u64 pointer) {{ ret; }}\n"
+            ),
+        );
+        for (a, b) in [(&first, &second), (&second, &first)] {
+            match merge_ptx_bundles([a, b]) {
+                Err(EmbeddedModuleError::ConflictingEntry {
+                    entry,
+                    first,
+                    second,
+                }) => {
+                    assert_eq!(entry, name);
+                    assert_eq!(first, a.name);
+                    assert_eq!(second, b.name);
+                }
+                result => panic!("expected conflicting entry: {result:?}"),
+            }
+        }
+        assert!(matches!(
+            merge_ptx_bundles([&first, &first]),
+            Err(EmbeddedModuleError::ConflictingEntry { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_entries_inside_one_bundle() {
+        let bundle = ptx_bundle(
+            "duplicate",
+            ".version 8.9\n.target sm_80\n.address_size 64\n.visible .entry copy() { ret; }\n.visible .entry copy() { ret; }\n",
+        );
+        assert!(matches!(
+            merge_ptx_bundles([&bundle]),
+            Err(EmbeddedModuleError::ConflictingEntry { .. })
+        ));
+    }
+
+    #[test]
+    fn permits_distinct_specializations_and_repeated_extern_declarations() {
+        let first = ptx_bundle(
+            "first",
+            ".version 8.9\n.target sm_80\n.address_size 64\n.extern .func helper();\n.visible .entry copy_TID_11111111111111111111111111111111() { ret; }\n",
+        );
+        let second = ptx_bundle(
+            "second",
+            ".version 8.9\n.target sm_80\n.address_size 64\n.extern .func helper();\n.visible .entry copy_TID_22222222222222222222222222222222() { ret; }\n",
+        );
+        let merged = merge_ptx_bundles([&first, &second]).unwrap();
+        assert_eq!(merged.matches(".entry copy_TID_").count(), 2);
+        assert_eq!(merged.matches(".extern .func helper()").count(), 2);
+    }
+
     /// The merge is order-explicit: exactly one header set (the first PTX
     /// bundle's), every body present in iteration order, non-PTX bundles
     /// skipped. #1277's collision-free-namespace example checks the same
@@ -454,7 +666,8 @@ mod tests {
 .address_size 64
 .visible .entry kernel() { ret; }
 ";
-        let (body, max_file_index) = prepare_bundle_body(ptx, true, 0).unwrap();
+        let (body, max_file_index) =
+            prepare_bundle_body(ptx, true, 0, "test", &mut PtxMergeState::default()).unwrap();
         assert_eq!(body, "// .target sm_1\n.visible .entry kernel() { ret; }\n");
         assert_eq!(max_file_index, 0);
     }
@@ -462,7 +675,8 @@ mod tests {
     #[test]
     fn debug_indices_ignore_comments_paths_and_label_substrings() {
         let ptx = ".file /* 90 */ 1 \"source12.rs\"\n.loc /* 80 */ 1 2 3, function_name $inlined_at7, inlined_at /* 70 */ 1 4 5 // inlined_at 60\n";
-        let (body, max_index) = prepare_bundle_body(ptx, false, 3).unwrap();
+        let (body, max_index) =
+            prepare_bundle_body(ptx, false, 3, "test", &mut PtxMergeState::default()).unwrap();
         assert_eq!(
             body,
             ".file /* 90 */ 4 \"source12.rs\"\n.loc /* 80 */ 4 2 3, function_name $inlined_at7, inlined_at /* 70 */ 4 4 5 // inlined_at 60\n"
@@ -481,12 +695,22 @@ mod tests {
             ".loc 1 2 3, inlined_at -1 4 5\n",
             ".file 18446744073709551616 \"source.rs\"\n",
         ] {
-            assert!(prepare_bundle_body(ptx, false, 1).is_err(), "{ptx}");
+            assert!(
+                prepare_bundle_body(ptx, false, 1, "test", &mut PtxMergeState::default()).is_err(),
+                "{ptx}"
+            );
         }
         assert!(
-            prepare_bundle_body(".file 18446744073709551615 \"source.rs\"\n", false, 1)
-                .unwrap_err()
-                .contains("overflow")
+            prepare_bundle_body(
+                ".file 18446744073709551615 \"source.rs\"\n",
+                false,
+                1,
+                "test",
+                &mut PtxMergeState::default()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("overflow")
         );
     }
 

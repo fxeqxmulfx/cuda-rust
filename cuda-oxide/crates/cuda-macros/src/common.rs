@@ -96,6 +96,20 @@ pub(crate) fn reject_reserved_name(name: &Ident) -> Option<TokenStream> {
     }
 }
 
+/// Keep source entries out of the compiler-owned specialization namespace.
+/// Generic entry names identify a concrete function item, not just its ABI.
+pub(crate) fn kernel_entry_name_error(name: &Ident) -> Option<syn::Error> {
+    let spelling = name.to_string();
+    if spelling.contains("_TID_") {
+        Some(syn::Error::new(
+            name.span(),
+            "kernel names containing `_TID_` are reserved for compiler-generated specialization identities",
+        ))
+    } else {
+        None
+    }
+}
+
 /// Reject argument-position `impl Trait`, which rustc represents as a hidden
 /// type parameter that procedural macros cannot name at launch sites.
 ///

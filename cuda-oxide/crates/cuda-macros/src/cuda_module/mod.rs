@@ -160,6 +160,12 @@ pub(crate) fn expand_cuda_module_inner(
         .kernels
         .iter()
         .any(|kernel| kernel.launch_contract.is_some());
+    // Every generic entry is named from the concrete function-item identity.
+    // The backend reserves that namespace and the embedded PTX merger rejects
+    // duplicate entry definitions. A missing specialization fails lookup before
+    // launch. Constants and bare entries do not carry this provenance proof.
+    let has_typed_embedded_provenance =
+        constants.is_empty() && transformed.kernels.iter().all(|kernel| kernel.is_generic);
     // Read the bundle from the binary the linker placed the artifact anchor
     // in, so a module compiled into a shared object (a plugin, a Python
     // extension, an evcxr cell) loads its own artifact instead of searching
@@ -223,7 +229,35 @@ pub(crate) fn expand_cuda_module_inner(
     let set_constant_methods = constants
         .iter()
         .map(generate_cuda_module_set_constant_method);
-    let async_module_items = if cfg!(feature = "async") && has_launch_contract {
+    let async_module_items = if cfg!(feature = "async")
+        && has_launch_contract
+        && has_typed_embedded_provenance
+    {
+        quote! {
+            /// Loads the compiler's embedded generic kernel specializations.
+            pub fn load_async(
+                device_id: usize,
+            ) -> ::core::result::Result<LoadedModule, ::cuda_host::cuda_async::simt::error::DeviceError> {
+                ::cuda_host::load_cuda_module_from_async_context(device_id, |ctx| load(ctx))
+            }
+
+            /// Loads a caller-selected artifact for this contracted module.
+            ///
+            /// # Safety
+            ///
+            /// Every selected kernel must have the exact ABI and resource
+            /// semantics declared by this `cuda_module`.
+            pub unsafe fn load_async_named(
+                device_id: usize,
+                name: &str,
+            ) -> ::core::result::Result<LoadedModule, ::cuda_host::cuda_async::simt::error::DeviceError> {
+                ::cuda_host::load_cuda_module_from_async_context(device_id, |ctx| {
+                    // SAFETY: upheld by this function's caller.
+                    unsafe { load_named(ctx, name) }
+                })
+            }
+        }
+    } else if cfg!(feature = "async") && has_launch_contract {
         quote! {
             /// Loads this package's embedded artifact for a contracted module.
             ///
@@ -276,7 +310,31 @@ pub(crate) fn expand_cuda_module_inner(
     } else {
         TokenStream2::new()
     };
-    let load_definition = if has_launch_contract {
+    let load_definition = if has_launch_contract && has_typed_embedded_provenance {
+        quote! {
+            /// Loads the compiler's embedded generic kernel specializations.
+            ///
+            /// Specializations are resolved by concrete function-item identity;
+            /// conflicting definitions fail loading and missing entries fail
+            /// lookup before a launch. The mapped image must remain readable
+            /// through Linux or Android procfs. Caller-provided modules require
+            /// unsafe binding through `from_module`.
+            pub fn load(
+                ctx: &::std::sync::Arc<::cuda_core::CudaContext>,
+            ) -> ::core::result::Result<LoadedModule, ::cuda_host::EmbeddedModuleError> {
+                #artifact_anchor_statements
+                let anchor = __cuda_oxide_artifact_anchor
+                    .ok_or(::cuda_host::EmbeddedModuleError::NoArtifactAnchor)?;
+                let module = ::cuda_host::load_all_ptx_bundles_merged_from_anchor(ctx, anchor)?;
+                // SAFETY: only compiler-embedded PTX from the verified mapped
+                // image is selected. Non-generic entries cannot use the specialization namespace, and the
+                // merger rejects duplicate definitions. Each typed launcher's
+                // function-item identity must therefore resolve its own exact
+                // specialization or return an error without launching.
+                unsafe { from_module(module) }.map_err(::cuda_host::EmbeddedModuleError::Driver)
+            }
+        }
+    } else if has_launch_contract {
         quote! {
             /// Loads this package's embedded artifact for a contracted module.
             ///
@@ -621,6 +679,9 @@ fn cuda_module_kernel(
     if !has_attr_named(&item_fn.attrs, "kernel") {
         return Ok(None);
     }
+    if let Some(err) = crate::common::kernel_entry_name_error(&item_fn.sig.ident) {
+        return Err(err);
+    }
     if let Some(err) = impl_trait_parameter_error(item_fn, "kernel") {
         return Err(err);
     }
@@ -843,24 +904,21 @@ fn cuda_module_path_description(module_path: &[Ident]) -> String {
 /// Without this handshake the bundle was silently dropped and `load()`
 /// failed at runtime with `ModuleNotFound` (issue #72).
 ///
-/// Without an owner filter, both sides keep using the legacy package+version
-/// anchor for compatibility with older wrappers and backends. A non-empty
-/// owner filter activates the v2 package+version+crate+binary identity. That
+/// Non-generic modules without an owner filter keep the legacy package+version
+/// reference for compatibility with older backends. Generic modules and a
+/// non-empty owner filter use the v2 package+version+crate+binary identity. That
 /// target-specific identity prevents an unselected binary from satisfying a
 /// selected library's reference (or vice versa); an unselected new macro emits
 /// no reference at all. The backend also keeps a weak legacy alias for older
 /// macro expansions in mixed-version builds.
 ///
-/// The reference is only emitted when the module is guaranteed to produce
-/// an artifact for this crate. Generic kernels are monomorphized (and
-/// their PTX embedded) in the *consuming* crate, so a module with only
-/// generic kernels yields no artifact here, and an anchor reference would
-/// be an undefined-symbol link error. The same reasoning extends to
-/// cfg-gated kernels: root `load()` emits one equivalent guarded reference per
-/// concrete kernel in the complete inline tree. Each reference carries the
-/// kernel's effective ancestor-plus-local availability attributes, so a module
-/// containing only nested kernels is still independently loadable while no
-/// anchor is referenced when every concrete kernel is absent.
+/// Every enabled kernel retains this crate's artifact, including generic
+/// kernels instantiated by non-generic library functions. An all-generic
+/// defining crate may have no local specializations; the backend then emits
+/// an anchor-only placeholder so this reference remains linkable. Generic
+/// modules always use a target-specific anchor, even without an owner filter,
+/// so a consuming binary cannot satisfy its defining library's reference.
+/// Each reference carries the kernel's ancestor-plus-local cfg attributes.
 ///
 /// The anchor's address also tells `load_named()` where the bundle is: the
 /// linker keeps the anchor and the `.oxart` section in the same binary, so
@@ -882,8 +940,8 @@ fn cuda_module_artifact_anchor_statements(
     })
 }
 
-/// One guarded anchor reference per concrete kernel, or none when this crate
-/// produces no artifact; see [`cuda_module_artifact_anchor_statements`].
+/// One guarded anchor reference per enabled kernel; see
+/// [`cuda_module_artifact_anchor_statements`].
 fn cuda_module_artifact_anchor_references(
     kernels: &[CudaModuleKernel],
 ) -> syn::Result<Vec<TokenStream2>> {
@@ -908,12 +966,8 @@ fn cuda_module_artifact_anchor_references(
         return Ok(Vec::new());
     }
 
-    if !kernels.iter().any(|kernel| !kernel.is_generic) {
-        return Ok(Vec::new());
-    }
-
     let binary_name = std::env::var("CARGO_BIN_NAME").ok();
-    let anchor = if owner_selection.is_some() {
+    let anchor = if owner_selection.is_some() || kernels.iter().any(|kernel| kernel.is_generic) {
         artifact_anchor_symbol_v2(
             &package_name,
             &package_version,
@@ -926,7 +980,6 @@ fn cuda_module_artifact_anchor_references(
     let anchor_name = LitStr::new(&anchor, proc_macro2::Span::call_site());
     let references = kernels
         .iter()
-        .filter(|kernel| !kernel.is_generic)
         .map(|kernel| {
             let cfg_attrs = &kernel.effective_cfg_attrs;
             quote! {

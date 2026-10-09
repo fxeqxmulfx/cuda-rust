@@ -59,11 +59,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Item | Purpose |
 |------|---------|
 | `LoadedModule` | Typed handle around the embedded CUDA module and cached kernel functions |
-| `load(&Arc<CudaContext>)` | Load the current package's embedded bundle; unsafe when the module has a launch contract |
+| `load(&Arc<CudaContext>)` | Load compiler-embedded code; safe for constant-free modules containing only generic kernels, unsafe for other contracted modules |
 | `load_named(&Arc<CudaContext>, name)` | Load a specific embedded bundle by name; unsafe when the module has a launch contract |
 | `from_module(Arc<CudaModule>)` | Wrap an already-loaded CUDA module; unsafe when the module has a launch contract |
 | `LoadedModule::{kernel}` | Safe prepared launch for a contracted kernel; unsafe raw launch otherwise |
-| `load_async(device_id)` | With feature `async`, load from a `cuda-async` device context; unsafe when contracted |
+| `load_async(device_id)` | With feature `async`, use the same embedded provenance rules as `load` from a `cuda-async` context |
 | `LoadedModule::{kernel}_async` | With feature `async`, build a lazy prepared launch; unsafe when given raw configuration |
 | `LoadedModule::{kernel}_async_owned` | Build an owned async launch that returns its buffers; unsafe when given raw configuration |
 
@@ -172,14 +172,21 @@ Borrowed and owned prepared async methods return immutable wrappers, so safe
 code cannot change geometry after validation; they recheck the
 scheduler-selected stream's context at submission time.
 
-Binding code is a one-time unsafe boundary for contracted modules. Embedded
-bundles are currently named per package, not per library/binary target, so even
-`load()` cannot prove that a same-package sibling contains the matching ABI and
-contract. `load`, `load_async`, `from_module`, `load_named`, and
-`load_async_named` therefore require the caller to assert artifact provenance.
-For generic modules, the caller must also ensure the merged PTX bundles contain
-the matching specializations and no conflicting entry definitions. Preparation
-and repeated launches are safe after that binding.
+For a constant-free module containing only generic kernels, `load` and
+`load_async` are safe. Every entry uses the concrete function-item identity;
+the compiler reserves the `_TID_` namespace and the merger rejects conflicting
+entry definitions before calling the driver. Compiler-owned anchors retain
+specializations emitted in the defining library as well as its consumer. The
+loader verifies the original mapped image rather than accepting a selected
+path or a replacement file. Missing anchors, unreadable Linux/Android procfs,
+or absent specializations return errors; every required specialization must
+be linked into that same image.
+
+Other contracted modules keep an unsafe binding boundary: bare entry names and
+package bundle names cannot establish the same typed provenance. `load_named`,
+`load_async_named`, and `from_module` also remain unsafe for every contracted
+module because a matching symbol alone does not establish its ABI or resource
+contract. Preparation and checked repeated launches are safe after binding.
 
 The declared dynamic shared-memory byte range is an author contract because
 arbitrary pointer offsets cannot be inferred. Alignment is compiler-enforced:

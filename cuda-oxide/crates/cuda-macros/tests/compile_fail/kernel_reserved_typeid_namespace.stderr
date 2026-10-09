@@ -1,0 +1,5 @@
+error: kernel names containing `_TID_` are reserved for compiler-generated specialization identities
+ --> tests/compile_fail/kernel_reserved_typeid_namespace.rs:5:4
+  |
+5 | fn copy_TID_0123456789abcdef0123456789abcdef() {}
+  |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

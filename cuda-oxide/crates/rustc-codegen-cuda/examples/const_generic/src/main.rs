@@ -123,6 +123,8 @@ fn main() {
     verify_generated_ptx();
 
     let context = CudaContext::new(0).expect("create CUDA context");
+    const_generic::verify_library_specialization(&context);
+    const_generic::verify_rows::<8>(&context);
     let stream = context.default_stream();
     let module = kernels::load(&context).expect("load const-generic module");
     let config = LaunchConfig {
@@ -169,7 +171,9 @@ fn main() {
         assert_eq!(same_8[index], index as u32);
     }
 
-    println!("const_generic: PASS (distinct VALUE=4 and VALUE=8 kernel results)");
+    println!(
+        "const_generic: PASS (distinct constants, checked generic library and consumer launches)"
+    );
 }
 
 #[cfg(test)]

@@ -51,3 +51,11 @@ check requires `libcuda.so.1`. Compile-only CI does not execute it.
 That check proves that every host name resolves to PTX, the two `write_value`
 entries retain `#[launch_bounds(64)]`, and each body contains its own folded
 constant.
+
+The checked `copy_rows` kernel lives in this package's library. A concrete
+library function instantiates `<4>` there; the executable instantiates `<8>`.
+The safe embedded loader must retain both artifacts even though every kernel
+in the library is generic. Both launches verify the last row of a 65-row input,
+and reject an over-capacity width and a short output before reaching the driver.
+Caller-selected `load_named` and `from_module` bindings for contracted modules
+remain unsafe.

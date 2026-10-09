@@ -18,6 +18,8 @@ fn launch_contract_types_are_resolved_semantically() {
     t.compile_fail("tests/compile_fail/launch_contract_alias_hides_row_width.rs");
     t.compile_fail("tests/compile_fail/launch_contract_alias_fakes_row_width.rs");
     t.compile_fail("tests/compile_fail/launch_contract_untrusted_loaders.rs");
+    t.compile_fail("tests/compile_fail/kernel_reserved_typeid_namespace.rs");
+    t.compile_fail("tests/compile_fail/generic_contract_foreign_binding_requires_unsafe.rs");
     t.compile_fail("tests/compile_fail/launch_contract_wrong_const_brand.rs");
     t.compile_fail("tests/compile_fail/launch_contract_reordered_disjoint_alias.rs");
     t.compile_fail("tests/compile_fail/index_1d_u32_requires_contract.rs");

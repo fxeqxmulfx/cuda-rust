@@ -597,6 +597,34 @@ impl CodegenBackend for CudaCodegenBackend {
                 }
             }
 
+            // Generic modules retain their defining library's artifact too:
+            // some specializations are instantiated by non-generic host code
+            // in that library. With no local device code, keep the same anchor
+            // linkable without pretending that a PTX bundle exists.
+            if !has_device_code
+                && owner_selected
+                && collector::has_ptx_merge_required_marker_in_cgus(
+                    tcx,
+                    mono_partitions.codegen_units,
+                )
+            {
+                let output_dir = self
+                    .config
+                    .ptx_output_dir
+                    .clone()
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+                match write_generic_artifact_anchor_placeholder(
+                    &output_dir,
+                    crate_name.as_str(),
+                    tcx.sess.target.llvm_target.as_ref(),
+                ) {
+                    Ok(path) => artifact_objects.push(path),
+                    Err(error) => tcx.dcx().fatal(format!(
+                        "[rustc_codegen_cuda] Failed to write generic artifact anchor: {error}"
+                    )),
+                }
+            }
+
             // Only log for crates that have device code (reduces noise from dependency crates)
             if self.config.verbose && has_device_code {
                 eprintln!(
@@ -750,7 +778,6 @@ impl CodegenBackend for CudaCodegenBackend {
                                 &result,
                                 artifact,
                                 device_functions,
-                                self.config.device_codegen_crates.is_some(),
                                 materialization_request,
                             ) {
                                 Ok(path) => {
@@ -859,7 +886,6 @@ fn write_device_artifact_object(
     result: &device_codegen::DeviceCodegenResult,
     artifact: &device_codegen::DeviceCodegenArtifact,
     functions: &[collector::CollectedFunction<'_>],
-    use_target_specific_anchor: bool,
     materialization_request: Option<materialize::MaterializationRequest>,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let bundle_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| output_name.to_string());
@@ -926,33 +952,26 @@ fn write_device_artifact_object(
     // this crate is a library, the artifact object becomes an rlib archive
     // member, and the linker only extracts it if some other object holds an
     // undefined reference to a symbol defined here. The `#[cuda_module]`
-    // macro emits that reference from the generated `load_named()`. Normal
-    // builds preserve the legacy package-level symbol. Owner-filtered builds
-    // use a target-specific v2 symbol plus a weak legacy alias, so an older
-    // macro still links without letting a filtered target hide a selected
-    // target's artifact. Without an anchor, library-crate bundles were
-    // dead-stripped and `load()` failed at runtime with ModuleNotFound
-    // (issue #72).
+    // macro emits that reference from its generated loaders. Always define a
+    // target-specific symbol: generic modules also need to retain library
+    // specializations without an owner filter. A weak legacy alias keeps older
+    // macro expansions linkable across library and binary targets.
     let package_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
     let legacy_anchor =
         reserved_oxide_symbols::artifact_anchor_symbol(&bundle_name, &package_version);
-    let object = if use_target_specific_anchor {
-        let binary_name = std::env::var("CARGO_BIN_NAME").ok();
-        let target_anchor = reserved_oxide_symbols::artifact_anchor_symbol_v2(
-            &bundle_name,
-            &package_version,
-            output_name,
-            binary_name.as_deref(),
-        );
-        oxide_artifacts::build_host_object_for_target_with_legacy_anchor(
-            &blob,
-            host_target,
-            &target_anchor,
-            &legacy_anchor,
-        )?
-    } else {
-        oxide_artifacts::build_host_object_for_target(&blob, host_target, Some(&legacy_anchor))?
-    };
+    let binary_name = std::env::var("CARGO_BIN_NAME").ok();
+    let target_anchor = reserved_oxide_symbols::artifact_anchor_symbol_v2(
+        &bundle_name,
+        &package_version,
+        output_name,
+        binary_name.as_deref(),
+    );
+    let object = oxide_artifacts::build_host_object_for_target_with_legacy_anchor(
+        &blob,
+        host_target,
+        &target_anchor,
+        &legacy_anchor,
+    )?;
     write_artifact_object(output_dir, output_name, host_target, &object, "embed")
 }
 
@@ -1098,6 +1117,24 @@ fn emit_launch_bounds_spill_warnings(
         }
         diagnostic.emit();
     }
+}
+
+fn write_generic_artifact_anchor_placeholder(
+    output_dir: &Path,
+    output_name: &str,
+    host_target: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let package_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| output_name.to_string());
+    let package_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let binary_name = std::env::var("CARGO_BIN_NAME").ok();
+    let anchor_symbol = reserved_oxide_symbols::artifact_anchor_symbol_v2(
+        &package_name,
+        &package_version,
+        output_name,
+        binary_name.as_deref(),
+    );
+    let object = oxide_artifacts::build_host_anchor_object_for_target(host_target, &anchor_symbol)?;
+    write_artifact_object(output_dir, output_name, host_target, &object, "anchor")
 }
 
 fn write_filtered_artifact_anchor_object(

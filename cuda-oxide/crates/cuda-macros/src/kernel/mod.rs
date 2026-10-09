@@ -9,8 +9,8 @@ pub(crate) mod codegen;
 pub(crate) mod scope;
 
 use crate::common::{
-    attr_path_ends_with, grid_constant_pointee, impl_trait_parameter_error, reject_reserved_name,
-    track_codegen_environment,
+    attr_path_ends_with, grid_constant_pointee, impl_trait_parameter_error,
+    kernel_entry_name_error, reject_reserved_name, track_codegen_environment,
 };
 use crate::cuda_module::launchers::has_codegen_generics;
 use crate::kernel::codegen::{
@@ -184,6 +184,9 @@ pub(crate) fn kernel_entry(attr: TokenStream, item: TokenStream) -> TokenStream 
 
     if let Some(err) = reject_reserved_name(&input.sig.ident) {
         return err;
+    }
+    if let Some(err) = kernel_entry_name_error(&input.sig.ident) {
+        return err.to_compile_error().into();
     }
     if let Some(err) = impl_trait_parameter_error(&input, "kernel") {
         return err.to_compile_error().into();

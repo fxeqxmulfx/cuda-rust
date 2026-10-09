@@ -778,6 +778,77 @@ fn contracted_module_requires_provenance_for_every_loader() {
 }
 
 #[test]
+fn generic_contracted_module_has_safe_embedded_load_and_unsafe_foreign_binding() {
+    let module: ItemMod = parse_quote! {
+        mod kernels {
+            mod nested {
+                #[kernel]
+                #[launch_contract(domain = 1, block = (64, 1, 1))]
+                pub fn map<const N: usize>(mut out: DisjointSlice<[u32; N]>) {}
+            }
+        }
+    };
+    let expanded = expand_to_compact_string(module);
+    assert!(expanded.contains("pubfnload("));
+    assert!(!expanded.contains("pubunsafefnload("));
+    assert!(expanded.contains("pubunsafefnload_named("));
+    assert!(expanded.contains("pubunsafefnfrom_module("));
+    assert!(expanded.contains("::cuda_host::load_all_ptx_bundles_merged_from_anchor(ctx,anchor)?"));
+    #[cfg(feature = "async")]
+    {
+        assert!(expanded.contains("pubfnload_async("));
+        assert!(!expanded.contains("pubunsafefnload_async("));
+        assert!(expanded.contains("pubunsafefnload_async_named("));
+    }
+}
+
+#[test]
+fn mixed_contracted_module_keeps_embedded_loader_unsafe() {
+    let module: ItemMod = parse_quote! {
+        mod kernels {
+            #[kernel]
+            #[launch_contract(domain = 1, block = (64, 1, 1))]
+            pub fn map<const N: usize>(mut out: DisjointSlice<[u32; N]>) {}
+            mod nested {
+                #[kernel]
+                pub fn bare(mut out: DisjointSlice<u32>) {}
+            }
+        }
+    };
+    let expanded = expand_to_compact_string(module);
+    assert!(expanded.contains("pubunsafefnload("));
+    assert!(!expanded.contains("pubfnload("));
+}
+
+#[test]
+fn contracted_generic_module_with_constants_keeps_loader_unsafe() {
+    let module: ItemMod = parse_quote! {
+        mod kernels {
+            #[constant]
+            static TABLE: ConstantMemory<[u32; 4]> = ConstantMemory::UNINIT;
+            #[kernel]
+            #[launch_contract(domain = 1, block = (64, 1, 1))]
+            pub fn map<const N: usize>(mut out: DisjointSlice<[u32; N]>) {}
+        }
+    };
+    let expanded = expand_to_compact_string(module);
+    assert!(expanded.contains("pubunsafefnload("));
+}
+
+#[test]
+fn rejects_source_kernel_in_the_specialization_namespace() {
+    let module: ItemMod = parse_quote! {
+        mod kernels {
+            #[kernel]
+            pub fn map_TID_0123456789abcdef0123456789abcdef() {}
+        }
+    };
+    let error = crate::cuda_module::expand_cuda_module_inner(module, true).unwrap_err();
+    assert!(error.to_string().contains("reserved"));
+    assert!(error.to_string().contains("_TID_"));
+}
+
+#[test]
 fn uncontracted_module_preserves_safe_custom_loaders() {
     let module: ItemMod = parse_quote! {
         mod kernels {

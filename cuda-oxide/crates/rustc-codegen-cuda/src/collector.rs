@@ -299,6 +299,14 @@ fn compute_kernel_export_name<'tcx>(
         .generics_of(instance.def_id())
         .requires_monomorphization(tcx)
     {
+        // Generic typed loaders rely on this namespace being compiler-owned.
+        // Validate here too: a legacy explicit-instantiation wrapper or a
+        // hand-written collector root must not impersonate a generic entry.
+        if base_name.contains("_TID_") {
+            tcx.dcx().fatal(format!(
+                "non-generic kernel entry `{base_name}` uses the reserved `_TID_` specialization namespace"
+            ));
+        }
         return base_name.to_string();
     }
 
@@ -916,6 +924,20 @@ impl DiscoveryCtx {
     }
 }
 
+/// Whether this crate defines any enabled generic CUDA module kernel.
+/// This includes defining crates with no locally instantiated device entry.
+pub fn has_ptx_merge_required_marker_in_cgus<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    cgus: &[CodegenUnit<'tcx>],
+) -> bool {
+    cgus.iter().any(|cgu| {
+        cgu.items().iter().any(|(item, _data)| match item {
+            MonoItem::Static(def_id) => is_ptx_merge_required_marker(&tcx.def_path_str(*def_id)),
+            _ => false,
+        })
+    })
+}
+
 /// Collects all device-reachable functions starting from kernel entry points.
 ///
 /// This is the main entry point for device function collection. It:
@@ -941,12 +963,7 @@ pub fn collect_device_functions<'tcx>(
     verbose: bool,
 ) -> CollectionResult<'tcx> {
     let mut collector = DeviceCollector::new(tcx, verbose);
-    let mut requires_ptx_bundle_merge = cgus.iter().any(|cgu| {
-        cgu.items().iter().any(|(item, _data)| match item {
-            MonoItem::Static(def_id) => is_ptx_merge_required_marker(&tcx.def_path_str(*def_id)),
-            _ => false,
-        })
-    });
+    let mut requires_ptx_bundle_merge = has_ptx_merge_required_marker_in_cgus(tcx, cgus);
 
     // Find all kernel entry points
     for cgu in cgus {

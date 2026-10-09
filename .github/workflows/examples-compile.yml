@@ -46,7 +46,7 @@ jobs:
     timeout-minutes: 75
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Every example workspace must pin the same dependency versions. The
       # shared CARGO_TARGET_DIR below keys build caches on the resolved
@@ -60,10 +60,10 @@ jobs:
       # Needed for cuda.h and curand.h: bindgen runs in the shared
       # cuda-bindings build script. Same setup as unit-tests.yml / clippy.yml.
       - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
         id: cuda-toolkit
         with:
-          cuda: "13.1.1"
+          cuda: "13.4.2"
           method: network
           sub-packages: '["nvcc", "cudart-dev"]'
           # nvJitLink is packaged separately from cuda-nvcc on Linux. Keep it
@@ -72,33 +72,23 @@ jobs:
           # the latency-sensitive fmt job.
           non-cuda-sub-packages: '["libcurand-dev", "libnvjitlink-dev"]'
 
-      # The device pipeline shells out to LLVM's llc/opt for PTX
-      # generation. This pin is the FLOOR GATE: if someone lands IR that
-      # needs a newer llc, this job is where the floor bump becomes
-      # visible instead of on contributors' machines. LLVM 22 is the true
-      # floor: the ldmatrix/stmatrix family (llvm.nvvm.stmatrix.*, used by
-      # gemm_sol and gemm_sol_final) postdates llc-21, which "lowers" an
-      # unknown intrinsic by leaking its dotted LLVM name into the PTX as
-      # an `.extern .func` (exit 0, no diagnostic): unassemblable output
-      # that only surfaced once the ptxas verdict gate started assembling
-      # what this job produces. The pipeline now rejects such leaks with a
-      # named error, so an under-floor llc fails loudly here.
-      # If a future ubuntu-latest codename has no llvm-toolchain-*-22
-      # suite, apt-get update fails loudly; recover by pinning runs-on to
-      # the previous image or bumping the LLVM major here.
-      - name: Install LLVM 22 (llc/opt for the NVPTX backend)
+      # Match the development container and Nix shell's LLVM 23. The
+      # ldmatrix/stmatrix intrinsic families used by the GEMM examples need
+      # LLVM 22 or newer. Assemble the generated PTX below to catch unsupported
+      # intrinsics even if llc emits them as external function declarations.
+      - name: Install LLVM 23 (llc/opt for the NVPTX backend)
         run: |
           set -euo pipefail
           source /etc/os-release
           sudo install -d -m 0755 /etc/apt/keyrings
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
             | sudo tee /etc/apt/keyrings/apt-llvm-org.asc >/dev/null
-          echo "deb [signed-by=/etc/apt/keyrings/apt-llvm-org.asc] https://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-22 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm-22.list
+          echo "deb [signed-by=/etc/apt/keyrings/apt-llvm-org.asc] https://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-23.list
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends llvm-22
-          llc-22 --version | head -2
-          opt-22 --version | head -2
+          sudo apt-get install -y --no-install-recommends llvm-23
+          llc-23 --version | head -2
+          opt-23 --version | head -2
 
       - name: Compile every example (smoketest --compile-only)
         # Step-level timeout, below the job's 75: a job-level timeout
@@ -107,7 +97,7 @@ jobs:
         timeout-minutes: 50
         env:
           CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
-          CUDA_OXIDE_LLC: /usr/bin/llc-22
+          CUDA_OXIDE_LLC: /usr/bin/llc-23
           # Each example is its own cargo workspace; without a shared
           # target dir the dep tree rebuilds ~85 times and blows the
           # runner's ~14 GB disk (same trick as clippy.yml). smoketest.sh
@@ -135,7 +125,7 @@ jobs:
         working-directory: cuda-oxide
         env:
           CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
-          CUDA_OXIDE_LLC: /usr/bin/llc-22
+          CUDA_OXIDE_LLC: /usr/bin/llc-23
           CARGO_TARGET_DIR: ${{ runner.temp }}/examples-shared-target
           CARGO_INCREMENTAL: "0"
         run: |
@@ -256,7 +246,7 @@ jobs:
 
       - name: Upload failure logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: smoketest-compile-logs
           # One glob per log the artifact-modes step writes. `iket-trace-*`

@@ -12,7 +12,7 @@ This section walks through everything you need to get `cargo oxide run vecadd` w
 | **NVIDIA GPU**   | Ampere+ (sm_80+)    | Driver 580+ (a CUDA 13.x driver; loaded at run time)          |
 | **CUDA Toolkit** | 13.0+               | `nvcc`, `cuda.h` and `curand.h` must be available             |
 | **LLVM**         | 21+                 | Must include the NVPTX backend                                |
-| **Clang**        | 21+                 | `clang-21` — needed by `bindgen` for host `cuda-bindings`     |
+| **Clang**        | 21+                 | `clang-23` — needed by `bindgen` for host `cuda-bindings`     |
 
 The host runtime does not link `libcuda` at build time. The shared
 `cuda-bindings` crate loads it at the first driver call, so a binary starts
@@ -32,7 +32,7 @@ cuda-oxide currently targets **Linux only**. Windows is not supported.
 
 The repository includes a cuda-oxide devcontainer in `cuda-oxide/.devcontainer/`.
 Using it is the quickest way to get a reproducible development environment with
-CUDA Toolkit 13.0, LLVM 21, Clang 21, and the pinned Rust nightly already
+CUDA Toolkit 13.4.2, LLVM 23, Clang 23, and the pinned Rust nightly already
 installed.
 
 The host does not need the CUDA Toolkit installed. It does need:
@@ -76,7 +76,7 @@ Rust setup sections below.
 ## Nix / flake.nix
 
 The repository also ships `cuda-oxide/flake.nix`, providing a reproducible dev shell
-(CUDA 13, LLVM 22, Clang, pinned Rust nightly). Requires
+(CUDA 13.4.2, LLVM 23, Clang, pinned Rust nightly). Requires
 [Nix](https://nixos.org/download/) with flakes enabled, an NVIDIA driver on
 the host, and Linux (x86\_64 or aarch64).
 
@@ -184,33 +184,33 @@ cuda-oxide uses LLVM's NVPTX backend to lower LLVM IR to PTX.
 
 Usually `llc` in Rust toolchain is enough.
 
-Install LLVM 21 or newer and make sure `llc-21` (or `llc-22`) is on your `PATH`:
+Install LLVM 23 with the NVPTX backend and make sure `llc-23` is on your `PATH`:
 
 ```bash
 # Ubuntu / Debian
-sudo apt install llvm-21
+sudo apt install llvm-23
 ```
 
-If your distro packages do not provide `llvm-21`, use LLVM's apt helper:
+If your distro packages do not provide `llvm-23`, use LLVM's apt helper:
 
 ```bash
 sudo apt-get install -y lsb-release wget software-properties-common gnupg
 wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
-sudo ./llvm.sh 21
+sudo ./llvm.sh 23
 ```
 
 Verify that the NVPTX target is present:
 
 ```bash
-llc-21 --version | grep nvptx
+llc-23 --version | grep nvptx
 ```
 
 You should see a line containing `nvptx64` in the registered targets. The
 pipeline auto-discovers `llc-23`, `llc-22`, and `llc-21` in that order; pin a specific
-binary with `CUDA_OXIDE_LLC=/usr/bin/llc-21` if needed.
+binary with `CUDA_OXIDE_LLC=/usr/bin/llc-23` if needed.
 
 :::{warning}
-A stock LLVM build without the NVPTX backend will not work. The `llvm-21` Ubuntu package includes it by default, but if you build LLVM from source you must pass `-DLLVM_TARGETS_TO_BUILD="X86;NVPTX"` to CMake.
+A stock LLVM build without the NVPTX backend will not work. The `llvm-23` Ubuntu package includes it by default, but if you build LLVM from source you must pass `-DLLVM_TARGETS_TO_BUILD="X86;NVPTX"` to CMake.
 :::
 
 :::{important}
@@ -224,14 +224,14 @@ A stock LLVM build without the NVPTX backend will not work. The `llvm-21` Ubuntu
 The host `cuda-bindings` crate runs [`bindgen`](https://github.com/rust-lang/rust-bindgen), which loads `libclang.so` at runtime and needs clang's own resource-dir `stddef.h` — a bare `libclang1-*` runtime is not enough. Three packages cover both halves:
 
 ```bash
-sudo apt install libclang-21-dev libclang-cpp21-dev libclang-common-21-dev
+sudo apt install libclang-23-dev libclang-cpp23-dev libclang-common-23-dev
 ```
 
 `cargo oxide doctor` catches this up front; the symptom otherwise is `'stddef.h' file not found` during the host build.
 
 :::{tip}
 **If doctor still reports clang not found:**
-The issue may be that the versioned binary (e.g., clang-21) is installed but not mapped to the unversioned clang command required by bindgen. You can fix this by installing the clang meta-package, which manages these dependencies automatically:
+The issue may be that the versioned binary (e.g., clang-23) is installed but not mapped to the unversioned clang command required by bindgen. You can fix this by installing the clang meta-package, which manages these dependencies automatically:
 
 ```bash
 sudo apt install clang libclang-dev
@@ -240,11 +240,11 @@ sudo apt install clang libclang-dev
 :::
 
 :::{note}
-**Fresh Ubuntu 24.04 / DGX-OS:** after installing LLVM 21 via `apt.llvm.org/llvm.sh` as shown above, the versioned `clang-21` / `clang++-21` binaries are present but the unversioned aliases `cargo oxide doctor` looks for are not. Add them with `update-alternatives`:
+**Fresh Ubuntu 24.04 / DGX-OS:** after installing LLVM 23 via `apt.llvm.org/llvm.sh` as shown above, the versioned `clang-23` / `clang++-23` binaries are present but the unversioned aliases `cargo oxide doctor` looks for are not. Add them with `update-alternatives`:
 
 ```bash
-sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-21   100
-sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-21 100
+sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-23   100
+sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-23 100
 ```
 
 Validated on Asus GX10 / NVIDIA DGX Spark.
@@ -396,8 +396,8 @@ If everything is configured correctly, this compiles a Rust kernel to PTX, launc
 :::{tip}
 **Common issues:**
 
-- `No working llc found` -- prefer `rustup component add llvm-tools --toolchain nightly-2026-10-09`, or install LLVM 21+ (`sudo apt install llvm-21`), add `/usr/lib/llvm-21/bin` to your `PATH`, or set `CUDA_OXIDE_LLC=/usr/bin/llc-21`.
-- `'stddef.h' file not found` when building host `cuda-bindings` -- install clang dev headers: `sudo apt install clang-21` (or `libclang-common-21-dev`).
+- `No working llc found` -- prefer `rustup component add llvm-tools --toolchain nightly-2026-10-09`, or install LLVM 21+ (`sudo apt install llvm-23`), add `/usr/lib/llvm-23/bin` to your `PATH`, or set `CUDA_OXIDE_LLC=/usr/bin/llc-23`.
+- `'stddef.h' file not found` when building host `cuda-bindings` -- install clang dev headers: `sudo apt install clang-23` (or `libclang-common-23-dev`).
 - `cuda.h not found` -- Set `CUDA_TOOLKIT_PATH` to your CUDA install root, or ensure `/usr/local/cuda/include/cuda.h` exists.
 - `rust-src` / `llvm-tools` component missing -- Run `rustup component add rust-src llvm-tools --toolchain nightly-2026-10-09`.
 :::

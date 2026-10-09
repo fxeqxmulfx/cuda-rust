@@ -12,7 +12,7 @@ from a fresh checkout. If you just want to run an example, the
 |:-----------------|:----------------------------- |:------------------------------------------------------------|
 | **Rust nightly** | `nightly-2026-10-09` (pinned) | Compiler toolchain with `rustc-dev` for the codegen backend |
 | **CUDA Toolkit** | 13.0+ (with cuRAND headers)   | Driver API, `nvcc`, PTX assembler; `curand.h` for bindgen   |
-| **Clang**        | 21+ (`clang-21` pkg)          | `bindgen` in host `cuda-bindings` needs clang's headers     |
+| **Clang**        | 21+ (`clang-23` pkg)          | `bindgen` in host `cuda-bindings` needs clang's headers     |
 | **Linux**        | Tested on Ubuntu 24.04        | Windows and macOS are not supported                         |
 | **GPU**          | sm_80, sm_90, sm_100a         | Hardware target                                             |
 
@@ -87,20 +87,20 @@ emits.
 
 ```bash
 # Ubuntu / Debian
-sudo apt install llvm-21
+sudo apt install llvm-23
 ```
 
-If your distro packages do not provide `llvm-21`, use LLVM's apt helper:
+If your distro packages do not provide `llvm-23`, use LLVM's apt helper:
 
 ```bash
 sudo apt-get install -y lsb-release wget software-properties-common gnupg
 wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
-sudo ./llvm.sh 21
+sudo ./llvm.sh 23
 ```
 
 ```bash
 # Verify NVPTX support
-llc-21 --version | grep nvptx
+llc-23 --version | grep nvptx
 ```
 
 You should see `nvptx64 - NVIDIA PTX 64-bit` in the target list.
@@ -127,7 +127,7 @@ clang's own resource-dir `stddef.h` — a bare `libclang1-*` runtime is not
 enough.
 
 ```bash
-sudo apt install clang-21   # or libclang-common-21-dev
+sudo apt install clang-23   # or libclang-common-23-dev
 ```
 
 `cargo oxide doctor` verifies this up front.
@@ -266,14 +266,14 @@ repository/
 `llc` not found or missing NVPTX
 : The fastest fix is `rustup component add llvm-tools` — the pinned
   toolchain's `llc` is LLVM 23 with NVPTX enabled and is auto-picked up.
-  Otherwise install a system LLVM 21+ (`sudo apt install llvm-21`); the
+  Otherwise install a system LLVM 21+ (`sudo apt install llvm-23`); the
   pipeline probes the rustup `llc` first, then `llc-23` → `llc-22` →
   `llc-21` on `PATH`. To pin a specific binary set
   `CUDA_OXIDE_LLC=/path/to/llc`.
 
 `Intrinsic has incorrect argument type!` (from `llc`)
 : Your `llc` is older than LLVM 21 and cannot lower the modern TMA / tcgen05
-  / WGMMA intrinsic signatures. Install `llvm-21` and re-run.
+  / WGMMA intrinsic signatures. Install `llvm-23` and re-run.
 
 `error[E0463]: can't find crate for rustc_middle`
 : You are missing the `rustc-dev` component. Run:

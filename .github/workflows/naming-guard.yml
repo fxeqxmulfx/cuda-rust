@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The search, its canary self-test, and the reasoning behind the exact
       # pattern all live in the script, so they can be run and mutation-tested

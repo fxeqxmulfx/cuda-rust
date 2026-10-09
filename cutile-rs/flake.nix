@@ -23,9 +23,9 @@
           inherit system overlays;
         };
 
-        isDarwin = pkgs.stdenv.isDarwin;
+        isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
 
-        # CUDA 13.3 fetched from nvidia (headers needed on all platforms for
+        # CUDA 13.4.2 fetched from nvidia (headers needed on all platforms for
         # bindgen type generation; runtime libraries only needed on Linux)
         cudaRedistBase = "https://developer.download.nvidia.com/compute/cuda/redist";
         # NVIDIA publishes per-architecture redist archives; aarch64 (server) uses
@@ -38,7 +38,7 @@
             sha256 = sha256.${cudaRedistArch};
           };
         # Hashes come from NVIDIA's manifest for this release:
-        # https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.3.0.json
+        # https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.4.2.json
         # (per package: .<name>.<arch>.sha256). Update from there on version bumps.
         #
         # ORDER MATTERS: archives are extracted with --skip-old-files
@@ -48,50 +48,50 @@
         cudaRedistArchives = [
           (fetchCudaRedist {
             name = "cuda_crt";
-            version = "13.3.33";
+            version = "13.4.92";
             sha256 = {
-              linux-x86_64 = "4755d36d24c6ef7697a2d3e1dbb23c4562c9c0d97d48390d4cbd8ab32dec5b5f";
-              linux-sbsa = "6f6194918c00b980d8fd2111bf0aa004977760855c6e1528e0653bf4c889fbef";
+              linux-x86_64 = "c969e61ded12dbf0cf20ace72867f1622ec0e8ea1e1d305e27761012025f7aaa";
+              linux-sbsa = "0358db52257885611664240e030e45528f052aa1360c886f55dbaf2b2d61f87d";
             };
           })
           (fetchCudaRedist {
             name = "libnvvm";
-            version = "13.3.33";
+            version = "13.4.92";
             sha256 = {
-              linux-x86_64 = "fc9c1fd5844e44c0e5eeb051378c1b13cf0e3bb3fe4966d5103c38885424f802";
-              linux-sbsa = "5f8ca5c9a10c3c9804b045960ee6192281efec4c7d83d5f3245ec2de8612118e";
+              linux-x86_64 = "0e619cf3d5b27f7c812665599ca9761fc296e56129b24a85d822a5d8a1a3bd75";
+              linux-sbsa = "483085a4f52d272ea2c5a6cb4727b24efc2cecab4c4df99e80dfc6548e5b7929";
             };
           })
           (fetchCudaRedist {
             name = "cuda_nvcc";
-            version = "13.3.33";
+            version = "13.4.92";
             sha256 = {
-              linux-x86_64 = "93b098bda4a562ebf3541523ce82adc43f106a81dcf28bcbf8f0d8e093d1c66f";
-              linux-sbsa = "b5dde44aadd52234af3944ae3b2e74e811ad8e71fb600bcc9dfe6d8540353499";
+              linux-x86_64 = "60998f40cc9df5826b2a846e2dcc328133fbc5ef539398ce0a21cf5dcac7193d";
+              linux-sbsa = "8aebd451afb3984bc0019e803ae8a01a3837b7c69f36db779a7ce77e70831f5f";
             };
           })
           (fetchCudaRedist {
             name = "cuda_cudart";
-            version = "13.3.29";
+            version = "13.4.92";
             sha256 = {
-              linux-x86_64 = "1e59c4888267d27ba1a9bd0f3669a6439db1334a96e754cd9013c7c73e18dc9d";
-              linux-sbsa = "0cdd73d11885062daf3aa98ad4d7b8bd84f89b398be11f7054edea9ed31f597d";
+              linux-x86_64 = "0ac5dbc538d04e9983bc493b410cce4b459e1ee9f5f6654b6464ef7b3e14a8b5";
+              linux-sbsa = "47e65e60d0f7cf832bff7992bd7a87ba4888195c31210392b5f23c607fe6c2a8";
             };
           })
           (fetchCudaRedist {
             name = "libcurand";
-            version = "10.4.3.29";
+            version = "10.4.4.72";
             sha256 = {
-              linux-x86_64 = "0218e62ab413e435dcd0274ec8e63b62214e6aba8519201061d1597e73caadbb";
-              linux-sbsa = "3c2245e848ff8948663646ad7870cc8451b7cf1726758bedff7c123011126e4b";
+              linux-x86_64 = "6f725f9187dc5f675308b830f786c163f5b1b499d86986f94fb60aa701c13c0b";
+              linux-sbsa = "2968e2d86dce64896ee3c2ac86c9e0f7decec4a0f157c8d73e3d0f31582e9e0c";
             };
           })
           (fetchCudaRedist {
             name = "cuda_tileiras";
-            version = "13.3.36";
+            version = "13.4.92";
             sha256 = {
-              linux-x86_64 = "1b055db199f806c746d53331200ccd8480bfdddd14638ed2911f30ee0cc4447b";
-              linux-sbsa = "98d163bd49de3c06fc179e5534fe4d8d5e1ad65800bf8696f79d2aeccafa039e";
+              linux-x86_64 = "4b5f41dc0c99f2cb4dd20090c5a20a7756a6cfbf07c8dd21e960edec2e6ee3be";
+              linux-sbsa = "3c88705c0d4f3fe2bd11d81acfb14f3cc43d6ee79d42767f9a244ba40e866027";
             };
           })
         ];
@@ -100,7 +100,7 @@
         # own dereferenced path (/proc/self/exe), so through a symlink farm
         # it would look for nvvm/lib64/libnvvm.so inside the cuda_tileiras
         # store path, where it doesn't exist, and fail with exit status 5.
-        cudaToolkit = pkgs.runCommand "cuda-toolkit-13.3" { } ''
+        cudaToolkit = pkgs.runCommand "cuda-toolkit-13.4.2" { } ''
           mkdir -p $out
           # --skip-old-files: cross-archive path collisions are first-wins
           # (see order note above) and show up in the build log instead of
@@ -125,7 +125,7 @@
         '';
 
         # bindgen uses libclang to parse CUDA headers.
-        libclang = pkgs.llvmPackages.libclang;
+        libclang = pkgs.llvmPackages_23.libclang;
         libcDev = pkgs.lib.getDev pkgs.stdenv.cc.libc;
         bindgenClangArgs = pkgs.lib.optionalString (!isDarwin) "-isystem ${libcDev}/include";
 

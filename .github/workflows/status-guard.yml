@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Verify error* examples are in STATUS.md and smoketest.sh
         run: bash cuda-oxide/scripts/check-error-example-status.sh
@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reads sources only: no cargo, no CUDA toolkit, no LLVM.
       - name: Verify smoketest categories and standard-example success markers
@@ -53,7 +53,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reads Cargo.toml and README.md: no cargo, no lockfile, no network.
       - name: Verify README lists every workspace member
@@ -72,7 +72,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reads sources only: no rustup, no cargo, no CUDA toolkit.
       - name: Verify every copy of the toolchain pin agrees
@@ -88,7 +88,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reads the clap enum and the book: no cargo, no build, no network.
       - name: Verify the book documents every cargo oxide subcommand
@@ -106,7 +106,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reads the book, the crate and example READMEs, and cuda-device's
       # sources: no cargo, no build, no network.
@@ -127,7 +127,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
 # rustfmt comes from cuda-oxide/rust-toolchain.toml's component list through the
       # rustup proxy, as in fmt.yml, so the order checked is the pinned
@@ -147,7 +147,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Verify prose references name tracked files or declared outputs
         run: bash cuda-oxide/scripts/check-source-references.sh
@@ -166,7 +166,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Hashes one file and greps one page: no cargo, no build, no network.
       - name: Verify the dialect page's catalog stamp is current
@@ -184,7 +184,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reads Cargo.toml, unit-tests.yml and the Justfile: no cargo, no network.
       - name: Verify every workspace member is tested or declared untested
@@ -204,7 +204,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Deliberately no CUDA toolkit step: a toolkit on the runner would mask
       # exactly the dependency this job exists to keep out of the graph.
@@ -223,7 +223,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reads sources only: no rustup, no cargo, no CUDA toolkit.
       - name: Verify docs and templates spell the shared crates' simt paths
@@ -240,7 +240,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reads sources only: no rustup, no cargo, no CUDA toolkit.
       - name: Verify every shared-crate pin agrees with the root workspace
@@ -256,7 +256,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reads sources only: no rustup, no cargo, no CUDA toolkit.
       - name: Verify the in-tree crate matches the consumed release

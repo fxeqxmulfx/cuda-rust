@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
@@ -98,7 +98,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Only reads manifests: `cargo metadata` resolves the graph without
       # running build scripts, so this needs no CUDA toolkit and no LLVM.
@@ -111,7 +111,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
@@ -129,7 +129,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Clone repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Pure text check over tracked files: no toolchain, no network. The OSRB
       # review fixed 32 missing headers in #812 and the next two scripts to

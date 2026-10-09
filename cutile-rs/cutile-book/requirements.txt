@@ -11,13 +11,13 @@
 # an unresolved cross-reference, and the theme emits its own warnings, so
 # either can fail `-W` on a release nobody asked for.
 #
-# Each bound is the next major above what resolves today, so this changes no
-# installed version.
-sphinx>=7.0,<10
-pydata-sphinx-theme>=0.15,<1
-myst-parser>=3.0,<6
-sphinx-copybutton>=0.5,<1
-sphinx-design>=0.6,<1
-sphinx-sitemap>=2.6,<3
+# Minimum versions are the current stable releases; upper bounds keep
+# future major upgrades explicit.
+sphinx>=9.1.0,<10
+pydata-sphinx-theme>=0.23.0,<1
+myst-parser>=5.1.0,<6
+sphinx-copybutton>=0.5.2,<1
+sphinx-design>=0.7.0,<1
+sphinx-sitemap>=2.9.0,<3
 # Local live-reload only; no CI path invokes it.
-sphinx-autobuild>=2024.10,<2027
+sphinx-autobuild>=2025.8.25,<2026

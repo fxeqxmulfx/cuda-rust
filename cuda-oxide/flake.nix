@@ -53,7 +53,7 @@
         };
 
         # LLVM
-        llvmPkgs = pkgs.llvmPackages_22;
+        llvmPkgs = pkgs.llvmPackages_23;
 
         # Nightly Rust
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
@@ -61,7 +61,7 @@
         # cuda
         cudaSymlinked = pkgs.symlinkJoin {
           name = "cuda-symlinked";
-          paths = with pkgs.cudaPackages_13; [
+          paths = with pkgs.cudaPackages_13_4; [
             cuda_nvcc
             cuda_gdb.bin
             cuda_cudart
@@ -73,7 +73,7 @@
             cuda_crt
             # CUDA C++ Core Libraries — provides `<nv/target>` etc. that
             # `cuda_fp16.h` and other CTK headers reach into.
-            cuda_cccl
+            cccl
             libnvvm
             libnvjitlink.lib
             # cuRAND headers: the shared cuda-bindings crate (cutile-rs) runs

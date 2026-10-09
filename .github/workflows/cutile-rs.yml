@@ -51,10 +51,10 @@ jobs:
       tile: ${{ steps.changes.outputs.tile }}
       any_changed: ${{ steps.changes.outputs.any_changed }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: changes
         with:
           filters: |
@@ -84,7 +84,7 @@ jobs:
       needs.changes.outputs.any_changed != 'true'
     runs-on: linux-amd64-cpu16
     container:
-      image: nvidia/cuda:13.2.0-devel-ubuntu24.04
+      image: nvidia/cuda:13.2.1-devel-ubuntu24.04
       env:
         DEBIAN_FRONTEND: noninteractive
     env:
@@ -92,7 +92,7 @@ jobs:
       CUTILE_TILEIRAS_PATH: /usr/local/cuda/bin/tileiras
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./cutile-rs/.github/actions/setup
       - name: Verify assembler
         run: |
@@ -114,14 +114,14 @@ jobs:
       needs.changes.outputs.any_changed != 'true'
     runs-on: linux-amd64-cpu16
     container:
-      image: nvidia/cuda:13.4.1-devel-ubuntu24.04
+      image: nvidia/cuda:13.4.2-devel-ubuntu24.04
       env:
         DEBIAN_FRONTEND: noninteractive
     env:
       CUDA_TOOLKIT_PATH: /usr/local/cuda
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./cutile-rs/.github/actions/setup
       - name: Verify assembler version
         run: |
@@ -139,7 +139,7 @@ jobs:
       needs.changes.outputs.any_changed != 'true'
     runs-on: linux-amd64-cpu16
     container:
-      image: nvidia/cuda:13.3.0-devel-ubuntu24.04
+      image: nvidia/cuda:13.4.2-devel-ubuntu24.04
       env:
         DEBIAN_FRONTEND: noninteractive
     env:
@@ -154,7 +154,7 @@ jobs:
           command -v tileiras
           tileiras --help | grep -q "sm_120"
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./cutile-rs/.github/actions/setup
 
       # Cheapest checks first so a formatting or lint slip fails in seconds.
@@ -195,19 +195,19 @@ jobs:
       needs.changes.outputs.any_changed != 'true'
     runs-on: linux-amd64-cpu16
     container:
-      image: nvidia/cuda:13.3.0-devel-ubuntu24.04
+      image: nvidia/cuda:13.4.2-devel-ubuntu24.04
       env:
         DEBIAN_FRONTEND: noninteractive
     env:
       CUDA_TOOLKIT_PATH: /usr/local/cuda
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./cutile-rs/.github/actions/setup
 
       # Prebuilt binary instead of `cargo install` (which compiled the tool
       # from source on every run).
-      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-semver-checks
 
@@ -234,14 +234,14 @@ jobs:
       needs.changes.outputs.any_changed != 'true'
     runs-on: linux-amd64-cpu16
     container:
-      image: nvidia/cuda:13.0.0-devel-ubuntu24.04
+      image: nvidia/cuda:13.0.3-devel-ubuntu24.04
       env:
         DEBIAN_FRONTEND: noninteractive
     env:
       CUDA_TOOLKIT_PATH: /usr/local/cuda
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./cutile-rs/.github/actions/setup
 
       - name: Check shared crates against CUDA 13.0
@@ -264,7 +264,7 @@ jobs:
       needs.changes.outputs.any_changed != 'true'
     runs-on: linux-amd64-cpu16
     container:
-      image: nvidia/cuda:13.3.0-devel-ubuntu24.04
+      image: nvidia/cuda:13.4.2-devel-ubuntu24.04
       # ThreadSanitizer must disable ASLR; the default container seccomp blocks
       # the personality() call it uses, so relax it for this job.
       options: --security-opt seccomp=unconfined
@@ -275,7 +275,7 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly-2026-09-16
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # This nightly must ship clippy, miri, and rust-src on x86_64.
       - uses: ./cutile-rs/.github/actions/setup

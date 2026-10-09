@@ -152,7 +152,7 @@ cargo oxide update
 - **cargo-oxide** — cargo subcommand that drives the build pipeline (`cargo oxide run`, `build`, `sanitize`, `debug`, etc.)
 - **Rust nightly** with `rust-src` and `rustc-dev` and `llvm-tools` components (pinned in `rust-toolchain.toml`)
 - **CUDA Toolkit** (13.0+, including the cuRAND headers; `libcurand-dev` on Ubuntu). The shared `cuda-bindings` crate loads `libcuda` at run time and needs a CUDA 13.x driver (R580+)
-- **Clang + libclang dev headers** (`clang-21` / `libclang-common-21-dev`) — needed by `bindgen` when building the host `cuda-bindings` crate
+- **Clang + libclang dev headers** (`clang-23` / `libclang-common-23-dev`) — needed by `bindgen` when building the host `cuda-bindings` crate
 - **Linux** (tested on Ubuntu 24.04)
 
 ### Install
@@ -171,7 +171,7 @@ On first run, `cargo-oxide` will automatically fetch and build the codegen backe
 
 #### Nix (alternative)
 
-If you have Nix with flakes enabled, `nix develop` from `cuda-oxide/` gives you a reproducible shell with CUDA 13, LLVM 22, Clang, and the pinned Rust nightly — no manual apt installs. The shellHook auto-discovers host NVIDIA drivers on NixOS and non-NixOS systems.
+If you have Nix with flakes enabled, `nix develop` from `cuda-oxide/` gives you a reproducible shell with CUDA 13.4.2, LLVM 23, Clang, and the pinned Rust nightly — no manual apt installs. The shellHook auto-discovers host NVIDIA drivers on NixOS and non-NixOS systems.
 
 ```bash
 # From the repository root:
@@ -202,15 +202,15 @@ nvcc --version
 
 ```bash
 # Ubuntu/Debian
-sudo apt install llvm-21
+sudo apt install llvm-23
 ```
 
-If your distro packages do not provide `llvm-21`, use LLVM's apt helper:
+If your distro packages do not provide `llvm-23`, use LLVM's apt helper:
 
 ```bash
 sudo apt-get install -y lsb-release wget software-properties-common gnupg
 wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
-sudo ./llvm.sh 21
+sudo ./llvm.sh 23
 ```
 
 ```bash
@@ -231,7 +231,7 @@ clang's own resource-dir `stddef.h` — a bare `libclang1-*` runtime is not
 enough.
 
 ```bash
-sudo apt install clang-21   # or libclang-common-21-dev
+sudo apt install clang-23   # or libclang-common-23-dev
 ```
 
 `cargo oxide doctor` catches this up front; the symptom otherwise is a cryptic

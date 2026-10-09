@@ -94,10 +94,17 @@ fn ocean_gemm(c: &mut Criterion) {
     let device = Device::new(0).expect("Failed to get device.");
     let stream = device.new_stream().expect("Failed to get stream.");
 
-    // This is what the ocean benchmark uses.
-    let shapes = (0..6)
+    // Smoke tests exercise both tile configurations without the multi-GB
+    // allocations required by the full benchmark's largest matrices.
+    let (first_power, count) = if cfg!(feature = "smoke-test") {
+        (8, 2)
+    } else {
+        // This is what the ocean benchmark uses.
+        (10, 6)
+    };
+    let shapes = (0..count)
         .map(|i| {
-            let n = 2usize.pow(10 + i);
+            let n = 2usize.pow(first_power + i);
             (n, n, n)
         })
         .collect::<Vec<_>>();

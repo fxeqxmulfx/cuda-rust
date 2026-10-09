@@ -628,7 +628,7 @@ pub fn collect_mutated_variables_from_expr(expr: &Expr) -> Result<BTreeSet<Strin
 /// not descended into: their `continue`/`break` only shortens their own
 /// iteration. Closures are opaque for the same reason.
 ///
-/// Used to mark [`super::_value::LoopFrame::has_early_exit`]: a body that can
+/// Used to mark `LoopFrame::has_early_exit`: a body that can
 /// skip the rest of an iteration does not execute every access on every
 /// iteration, so no bounds check may be hoisted out of it.
 pub fn block_has_early_exit(block: &syn::Block) -> bool {

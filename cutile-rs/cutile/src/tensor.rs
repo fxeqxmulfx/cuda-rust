@@ -1041,7 +1041,7 @@ impl<T: DType> Tensor<T> {
     ///   it exactly once, after all cutile work above has completed.
     /// - **Bit validity.** Every element the memory holds — now and after any
     ///   write the owner makes — must be a valid `T`, as the `# Safety`
-    ///   section of [`DType`](cuda_core::DType) requires. This is automatic
+    ///   section of [`DType`] requires. This is automatic
     ///   for integer and floating-point `T`; for `T = bool` the owner must
     ///   store only `0` or `1`, since host code reads the bytes back as `bool`
     ///   without validation.
@@ -1095,7 +1095,7 @@ impl<T: DType> Tensor<T> {
     ///   party may write them. "Until the work completes" means past the
     ///   final stream synchronize / `.await`, not the builder-call return.
     /// - The memory must hold valid `T` values, as the `# Safety` section of
-    ///   [`DType`](cuda_core::DType) requires: automatic for integer and
+    ///   [`DType`] requires: automatic for integer and
     ///   floating-point `T`, but a `Tensor<bool>` over foreign memory requires
     ///   the owner to store only `0` or `1`, because host code reads the bytes
     ///   back as `bool` without validation.

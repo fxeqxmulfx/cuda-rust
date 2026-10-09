@@ -6,16 +6,16 @@
 //! Staged obligation resolution: the solver seam for launch-time check hoisting.
 //!
 //! The predicate vocabulary itself lives in [`cuda_async::predicate`] (a
-//! canonical [`Term`]/[`Predicate`] shared with the host launcher). This module
-//! adds the *solver* around it:
-//! - [`Obligation`] — a predicate to prove, with a diagnostic `cause` (rustc
+//! canonical [`Term`](cuda_async::predicate::Term)/[`Predicate`] shared with the
+//! host launcher). This module adds the *solver* around it:
+//! - `Obligation` — a predicate to prove, with a diagnostic `cause` (rustc
 //!   `Obligation`).
-//! - [`Assumptions`] — the set of predicates believed in scope (rustc
+//! - `Assumptions` — the set of predicates believed in scope (rustc
 //!   `ParamEnv.caller_bounds`).
-//! - [`resolve`] — picks the earliest [`Stage`] that discharges an obligation:
-//!   [`Resolution::Jit`] if a dominating assumption entails it, else
-//!   [`Resolution::Launch`] if the predicate ranges only over launch-known
-//!   operands (`predicate.stage() <= Launch`), else [`Resolution::Device`].
+//! - `resolve` — picks the earliest [`Stage`] that discharges an obligation:
+//!   `Resolution::Jit` if a dominating assumption entails it, else
+//!   `Resolution::Launch` if the predicate ranges only over launch-known
+//!   operands (`predicate.stage() <= Launch`), else `Resolution::Device`.
 //!
 //! Because [`Predicate`] is canonical (see `cuda_async::predicate`), assumption
 //! entailment is set membership and the launch-known test is `stage()` over the

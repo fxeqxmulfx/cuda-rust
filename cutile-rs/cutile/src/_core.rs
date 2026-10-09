@@ -844,13 +844,12 @@ pub mod core {
         /// Build a mutable tiled view of this tensor.
         ///
         /// Safe: constructing the view is not itself UB — the `&mut self` borrow
-        /// gives exclusive access for the view's lifetime, and *every* store
-        /// through the view is independently gated. The raw unchecked store
-        /// ([`PartitionMut::store`]) is `unsafe`; the proof-carrying stores
-        /// ([`PartitionMut::with_bounds`] → branded/block-id `coord`, and
-        /// [`PartitionMut::store_index`] via a minted `PartitionIndex`) are safe.
-        /// So no *unproven* store is reachable without `unsafe`. Mirrors the
-        /// immutable [`Tensor::partition`], which is likewise safe.
+        /// gives exclusive access for the view's lifetime. `PartitionMut::store`
+        /// checks bounds; `PartitionMut::store_unchecked` is `unsafe`. The
+        /// proof-carrying stores (`PartitionMut::with_bounds` → branded/block-id
+        /// `coord`, and `PartitionMut::store_index` via a minted `PartitionIndex`)
+        /// are safe. Mirrors the immutable [`Self::partition`], which is
+        /// likewise safe.
         pub fn partition_mut<'a, const R: [i32; N]>(
             &'a mut self,
             tile: Shape<R>,
@@ -1030,9 +1029,9 @@ pub mod core {
         unreachable!()
     }
 
-    /// Index forms accepted by [`MappedPartitionMut::store`].
+    /// Index forms accepted by `MappedPartitionMut::store`.
     ///
-    /// Either the whole minted [`PartitionIndex`] (every axis proven by the
+    /// Either the whole minted `PartitionIndex` (every axis proven by the
     /// stream), or a [`coord`]-built composite whose streamed-axis components
     /// were minted by this partition's `iter_indices()` and whose owned-axis
     /// (`OWNED` map dim) components carry a `Dim` or constant bounds proof.
@@ -1127,7 +1126,7 @@ pub mod core {
 
         /// Store `tile` at a proven-disjoint partition index.
         ///
-        /// Accepts the whole minted [`PartitionIndex`], or — on partitions
+        /// Accepts the whole minted `PartitionIndex`, or — on partitions
         /// with `OWNED` map axes — a [`coord`]-built composite: streamed-axis
         /// components must be minted by this partition's `iter_indices()`
         /// stream; owned-axis components carry a `Dim` or constant bounds
@@ -1434,7 +1433,7 @@ pub mod core {
 
     /// Mutable partition whose valid axes have been tied to `Dim` values.
     ///
-    /// The mutable mirror of [`BoundedPartition`]: safe stores require
+    /// The mutable mirror of `BoundedPartition`: safe stores require
     /// `coord((...))` built from indices produced by those dimensions.
     #[cuda_tile::ty(name="!cuda_tile.partition_view",
                     type_params=["tile"],
@@ -1448,7 +1447,7 @@ pub mod core {
 
     impl<'a, E: ElementType, const D: [i32; 2]> PartitionMut<'a, E, D> {
         /// Tie this mutable partition's axes to `Dim` bounds, mirroring
-        /// [`Partition::with_bounds`]. Stores then require branded coords.
+        /// `Partition::with_bounds`. Stores then require branded coords.
         #[deprecated(
             since = "0.3.0",
             note = "iterate `0..num_tiles(&p, axis)` and index with plain arrays; \
@@ -1494,7 +1493,7 @@ pub mod core {
     }
 
     impl<'a, E: ElementType, const D: [i32; 2]> BoundedPartitionMut<'a, E, D> {
-        /// Checked store. Mirrors [`BoundedPartition::load`]: the index must be
+        /// Checked store. Mirrors `BoundedPartition::load`: the index must be
         /// a `coord((...))` branded by this partition's bound `Dim`s.
         pub fn store(&mut self, tile: Tile<E, D>, index: Coord2) -> Token {
             check_bounded_partition_access_mut(self, index);

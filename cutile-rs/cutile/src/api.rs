@@ -771,6 +771,10 @@ impl<T: DType> IntoFuture for AllocUninitialized<T> {
 /// tensor and applies the conversion kernel. Most users should use the conversion kernel
 /// directly with explicit partitioning.
 ///
+/// Signed FP8 formats use software GPU conversions on `sm_80` through `sm_89`.
+/// Conversion to FP8 rounds ties to even and saturates to finite values.
+/// Targets `sm_90` and newer use native FP8 Tile IR.
+///
 /// ## Examples
 ///
 /// ```rust,ignore

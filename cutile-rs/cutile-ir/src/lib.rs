@@ -14,6 +14,8 @@
 pub mod builder;
 pub mod bytecode;
 pub mod capabilities;
+#[doc(hidden)]
+pub mod emulation;
 pub mod ir;
 
 // Shared implementation details; not re-exported by the cuTile user API.

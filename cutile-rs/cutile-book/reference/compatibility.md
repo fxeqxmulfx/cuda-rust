@@ -86,6 +86,28 @@ The driver/toolkit combination must meet
 [NVIDIA's CUDA compatibility rules](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).
 We do not impose a blanket driver-version-at-least-toolkit-version check.
 
+## Software FP8 storage and conversions
+
+The Rust compiler supports `f8e4m3fn` and `f8e5m2` storage on `sm_80` through
+`sm_89` by emitting byte storage and software conversions on the GPU. Existing
+`api::full`, `api::zeros`, `api::ones`, and `api::convert` calls select this path
+automatically. Tensor shapes, strides, storage bytes, and launch arguments retain
+their layout. No host round trip is needed.
+
+Conversions support `f16`, `bf16`, `f32`, `f64`, `tf32`, integer types, and both
+signed FP8 formats. Conversion to FP8 rounds to nearest with ties to even and
+saturates infinities and out-of-range numbers to the largest finite value, as
+specified by Tile IR. NaNs and signed zero are preserved. Conversion from `f64`
+uses its original precision. Only zero padding is supported for emulated FP8
+views.
+
+For matrix multiplication or other computation, explicitly convert FP8 operands
+to `f16` or `f32` first. The software path does not implement native FP8 MMA,
+scaled MMA, numerical FP8 assumptions, or the unsigned scale formats. Its
+conversion kernels execute more instructions than native FP8 conversions.
+On `sm_90` and newer targets, the compiler retains native FP8 Tile IR. The
+requirements table above describes native Tile IR types and operations.
+
 ## Keeping the tables current
 
 Requirements live in `cutile-ir/src/requirements.rs`, based on the

@@ -980,6 +980,13 @@ impl<'m> CUDATileFunctionCompiler<'m> {
         self.emit_module_globals(&mut module)?;
         let entry_op = self.compile_entry_function(&mut module)?;
         module.functions.push(entry_op);
+        let lowering_target = self.target_capabilities.clone().unwrap_or_else(|| {
+            cutile_ir::capabilities::TargetCapabilities::new(
+                cutile_ir::bytecode::BytecodeVersion::CURRENT,
+                &self.gpu_name,
+            )
+        });
+        cutile_ir::emulation::lower_fp8_storage(&mut module, &lowering_target)?;
         if let Some(capabilities) = &self.target_capabilities {
             capabilities
                 .validate_module(&module)

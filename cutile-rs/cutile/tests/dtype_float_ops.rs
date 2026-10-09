@@ -69,6 +69,22 @@ mod float_add_module {
         out.store(tile_a + tile_b);
     }
 
+    #[cutile::entry()]
+    fn increment_fp8<T: ElementType, const B: i32>(
+        out: &mut Tensor<f32, { [B] }>,
+        input: &Tensor<T, { [-1] }>,
+    ) {
+        let pid = get_tile_block_id().0;
+        let mut current: Tile<T, { [B] }> = input.load_tile(shape![B], [pid]);
+        for _i in 0..2i32 {
+            let expanded: Tile<f32, { [B] }> = convert_tile(current);
+            let narrowed: Tile<T, { [B] }> = convert_tile(expanded + constant(1.0f32, shape![B]));
+            current = narrowed;
+        }
+        let result: Tile<f32, { [B] }> = convert_tile(current);
+        out.store(result);
+    }
+
     // Note: FP8 types (f8e4m3fn, f8e5m2) don't support direct arithmetic
     // on GPU — they're storage/quantization formats. FP8 add kernels are
     // not included here. Use convert to f16/f32 for compute.
@@ -205,10 +221,7 @@ fn create_ones_f8e4m3fn_and_convert_to_f32() {
 
         assert_eq!(result_f32.len(), 128);
         for (i, &v) in result_f32.iter().enumerate() {
-            assert!(
-                (v - 1.0).abs() < 0.5,
-                "f8e4m3fn: element {i} = {v}, expected 1.0"
-            );
+            assert_eq!(v, 1.0, "f8e4m3fn: element {i}");
         }
     });
 }
@@ -228,10 +241,319 @@ fn create_ones_f8e5m2_and_convert_to_f32() {
 
         assert_eq!(result_f32.len(), 128);
         for (i, &v) in result_f32.iter().enumerate() {
+            assert_eq!(v, 1.0, "f8e5m2: element {i}");
+        }
+    });
+}
+
+// Independent numerical reference: enumerate representable values instead of
+// reproducing the compiler's integer rounding algorithm.
+fn fp8_value(byte: u8, fraction_bits: i32, bias: i32, finite_only: bool) -> f64 {
+    let magnitude = byte & 0x7f;
+    let fraction = i32::from(magnitude) & ((1 << fraction_bits) - 1);
+    let exponent = i32::from(magnitude) >> fraction_bits;
+    let value = if finite_only && magnitude == 0x7f {
+        f64::NAN
+    } else if !finite_only && exponent == 31 {
+        if fraction == 0 {
+            f64::INFINITY
+        } else {
+            f64::NAN
+        }
+    } else if exponent == 0 {
+        f64::from(fraction) * 2f64.powi(1 - bias - fraction_bits)
+    } else {
+        (1.0 + f64::from(fraction) / f64::from(1 << fraction_bits)) * 2f64.powi(exponent - bias)
+    };
+    if byte & 0x80 != 0 {
+        -value
+    } else {
+        value
+    }
+}
+
+fn nearest_fp8(value: f64, fraction: i32, bias: i32, finite_only: bool) -> u8 {
+    let sign = if value.is_sign_negative() { 0x80 } else { 0 };
+    if value.is_nan() {
+        return sign | 0x7f;
+    }
+    let maximum = if finite_only { 0x7e } else { 0x7b };
+    if value.abs() >= fp8_value(maximum, fraction, bias, finite_only) {
+        return sign | maximum;
+    }
+    let mut best = 0;
+    let mut distance = value.abs();
+    for byte in 1..=maximum {
+        let candidate = (value.abs() - fp8_value(byte, fraction, bias, finite_only)).abs();
+        if candidate < distance || (candidate == distance && byte & 1 == 0) {
+            best = byte;
+            distance = candidate;
+        }
+    }
+    sign | best
+}
+
+fn check_fp8_decoding<T: cuda_core::DType>(
+    wrap: fn(u8) -> T,
+    fraction: i32,
+    bias: i32,
+    finite_only: bool,
+) {
+    let bytes = Arc::new((0..=255).map(wrap).collect::<Vec<_>>());
+    let src = Arc::new(
+        cutile::api::copy_host_vec_to_device(&bytes)
+            .sync()
+            .expect("copy FP8 bytes"),
+    );
+    let f32_values = cutile::api::convert::<T, f32>(src.clone())
+        .sync()
+        .expect("decode f32")
+        .dup()
+        .to_host_vec()
+        .sync()
+        .expect("copy f32");
+    let f64_values = cutile::api::convert::<T, f64>(src.clone())
+        .sync()
+        .expect("decode f64")
+        .dup()
+        .to_host_vec()
+        .sync()
+        .expect("copy f64");
+    let f16_values = cutile::api::convert::<T, f16>(src.clone())
+        .sync()
+        .expect("decode f16")
+        .dup()
+        .to_host_vec()
+        .sync()
+        .expect("copy f16");
+    let bf16_values = cutile::api::convert::<T, bf16>(src)
+        .sync()
+        .expect("decode bf16")
+        .dup()
+        .to_host_vec()
+        .sync()
+        .expect("copy bf16");
+    for byte in 0..=255u8 {
+        let expected = fp8_value(byte, fraction, bias, finite_only);
+        if expected.is_nan() {
+            assert!(f32_values[usize::from(byte)].is_nan(), "FP8 byte {byte:#x}");
+            assert!(f64_values[usize::from(byte)].is_nan(), "FP8 byte {byte:#x}");
+            assert!(f16_values[usize::from(byte)].is_nan(), "FP8 byte {byte:#x}");
             assert!(
-                (v - 1.0).abs() < 0.5,
-                "f8e5m2: element {i} = {v}, expected 1.0"
+                bf16_values[usize::from(byte)].is_nan(),
+                "FP8 byte {byte:#x}"
             );
+        } else {
+            assert_eq!(
+                f32_values[usize::from(byte)].to_bits(),
+                (expected as f32).to_bits(),
+                "FP8 byte {byte:#x}"
+            );
+            assert_eq!(
+                f64_values[usize::from(byte)].to_bits(),
+                expected.to_bits(),
+                "FP8 byte {byte:#x}"
+            );
+            assert_eq!(
+                f16_values[usize::from(byte)].to_bits(),
+                f16::from_f64(expected).to_bits(),
+                "FP8 byte {byte:#x}"
+            );
+            assert_eq!(
+                bf16_values[usize::from(byte)].to_bits(),
+                bf16::from_f64(expected).to_bits(),
+                "FP8 byte {byte:#x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn decode_every_fp8_bit_pattern() {
+    common::with_test_stack(|| {
+        check_fp8_decoding(f8e4m3fn, 3, 7, true);
+        check_fp8_decoding(f8e5m2, 2, 15, false);
+    });
+}
+
+fn check_fp8_quantization<T: cuda_core::DType>(
+    bits: fn(T) -> u8,
+    fraction: i32,
+    bias: i32,
+    finite_only: bool,
+) {
+    let maximum = if finite_only { 0x7e } else { 0x7b };
+    let mut doubles = vec![
+        0.0,
+        -0.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        -f64::NAN,
+        f64::MAX,
+        -f64::MAX,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+    ];
+    let mut floats = vec![
+        0.0,
+        -0.0,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        -f32::NAN,
+        f32::MAX,
+        -f32::MAX,
+        f32::MIN_POSITIVE,
+        -f32::MIN_POSITIVE,
+    ];
+    for byte in 0..maximum {
+        let midpoint = (fp8_value(byte, fraction, bias, finite_only)
+            + fp8_value(byte + 1, fraction, bias, finite_only))
+            * 0.5;
+        for raw in [
+            midpoint.to_bits() - 1,
+            midpoint.to_bits(),
+            midpoint.to_bits() + 1,
+        ] {
+            let x = f64::from_bits(raw);
+            doubles.extend([x, -x]);
+        }
+        for raw in [
+            (midpoint as f32).to_bits() - 1,
+            (midpoint as f32).to_bits(),
+            (midpoint as f32).to_bits() + 1,
+        ] {
+            let x = f32::from_bits(raw);
+            floats.extend([x, -x]);
+        }
+    }
+    let host = Arc::new(doubles.clone());
+    let src = Arc::new(
+        cutile::api::copy_host_vec_to_device(&host)
+            .sync()
+            .expect("copy f64"),
+    );
+    let encoded = cutile::api::convert::<f64, T>(src)
+        .sync()
+        .expect("encode f64")
+        .dup()
+        .to_host_vec()
+        .sync()
+        .expect("copy FP8");
+    for (&x, &actual) in doubles.iter().zip(&encoded) {
+        let actual = bits(actual);
+        if x.is_nan() {
+            assert!(fp8_value(actual, fraction, bias, finite_only).is_nan());
+        } else {
+            assert_eq!(
+                actual,
+                nearest_fp8(x, fraction, bias, finite_only),
+                "f64 input {x:?}"
+            );
+        }
+    }
+    let host = Arc::new(floats.clone());
+    let src = Arc::new(
+        cutile::api::copy_host_vec_to_device(&host)
+            .sync()
+            .expect("copy f32"),
+    );
+    let encoded = cutile::api::convert::<f32, T>(src)
+        .sync()
+        .expect("encode f32")
+        .dup()
+        .to_host_vec()
+        .sync()
+        .expect("copy FP8");
+    for (&x, &actual) in floats.iter().zip(&encoded) {
+        let actual = bits(actual);
+        if x.is_nan() {
+            assert!(fp8_value(actual, fraction, bias, finite_only).is_nan());
+        } else {
+            assert_eq!(
+                actual,
+                nearest_fp8(f64::from(x), fraction, bias, finite_only),
+                "f32 input {x:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fp8_quantization_rounds_ties_even_and_saturates() {
+    common::with_test_stack(|| {
+        check_fp8_quantization(|x: f8e4m3fn| x.0, 3, 7, true);
+        check_fp8_quantization(|x: f8e5m2| x.0, 2, 15, false);
+    });
+}
+
+#[test]
+fn fp8_fill_preserves_bytes_and_partial_partitions() {
+    common::with_test_stack(|| {
+        for byte in [0x00, 0x80, 0x81, 0x7b, 0x7e, 0x7f, 0xff] {
+            let e4 = cutile::api::full(f8e4m3fn(byte), &[3, 43])
+                .sync()
+                .expect("fill E4M3FN");
+            assert_eq!(e4.shape(), &[3, 43]);
+            let host = e4.dup().to_host_vec().sync().expect("copy E4M3FN");
+            assert_eq!(host, vec![f8e4m3fn(byte); 129]);
+            let e5 = cutile::api::full(f8e5m2(byte), &[129])
+                .sync()
+                .expect("fill E5M2");
+            let host = e5.dup().to_host_vec().sync().expect("copy E5M2");
+            assert_eq!(host, vec![f8e5m2(byte); 129]);
+        }
+    });
+}
+
+#[test]
+fn fp8_conversions_work_with_loop_carried_values() {
+    common::with_test_stack(|| {
+        let input = cutile::api::ones::<f8e4m3fn>(&[129])
+            .sync()
+            .expect("FP8 ones");
+        let mut output = cutile::api::zeros::<f32>(&[129]).sync().expect("output");
+        float_add_module::increment_fp8((&mut output).partition([128]), &input)
+            .sync()
+            .expect("FP8 loop");
+        assert_eq!(
+            output.dup().to_host_vec().sync().expect("copy result"),
+            vec![3.0f32; 129]
+        );
+    });
+}
+
+#[test]
+fn fp8_converts_to_and_from_integer_tensors() {
+    common::with_test_stack(|| {
+        let e4 = cutile::api::arange::<f8e4m3fn>(129)
+            .sync()
+            .expect("E4M3FN arange");
+        let e5 = cutile::api::arange::<f8e5m2>(129)
+            .sync()
+            .expect("E5M2 arange");
+        let e4 = Arc::new(e4);
+        let e5 = Arc::new(e5);
+        let e4_integer = cutile::api::convert::<f8e4m3fn, i32>(e4)
+            .sync()
+            .expect("E4M3FN to i32")
+            .dup()
+            .to_host_vec()
+            .sync()
+            .expect("copy i32");
+        let e5_integer = cutile::api::convert::<f8e5m2, i32>(e5)
+            .sync()
+            .expect("E5M2 to i32")
+            .dup()
+            .to_host_vec()
+            .sync()
+            .expect("copy i32");
+        for i in 0..129 {
+            let e4 = nearest_fp8(i as f64, 3, 7, true);
+            let e5 = nearest_fp8(i as f64, 2, 15, false);
+            assert_eq!(e4_integer[i], fp8_value(e4, 3, 7, true) as i32);
+            assert_eq!(e5_integer[i], fp8_value(e5, 2, 15, false) as i32);
         }
     });
 }

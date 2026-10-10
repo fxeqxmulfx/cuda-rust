@@ -109,6 +109,14 @@ struct Source {
     offset: Expr,
     swizzle: bool,
 }
+struct CopyGroup {
+    key: String,
+    columns: Expr,
+    stride: Expr,
+    offset: Ident,
+    types: Vec<proc_macro2::TokenStream>,
+    stores: Vec<proc_macro2::TokenStream>,
+}
 pub(crate) struct BlockPipeline {
     rows: Expr,
     iterations: Expr,
@@ -373,7 +381,7 @@ impl BlockPipeline {
         let state = internal_ident("__cuda_pipeline_state");
         let mut names = Vec::new();
         let mut views = Vec::new();
-        let mut copies = Vec::new();
+        let mut copy_groups: Vec<CopyGroup> = Vec::new();
         let mut offsets = Vec::new();
         let mut total = quote! { 0usize };
         let pointer = internal_ident("__cuda_pipeline_storage");
@@ -419,30 +427,32 @@ impl BlockPipeline {
                     let #guard = unsafe { ::cuda_device::shared::__ReadOnlyTile::from_initialized(#pointer.wrapping_add(#slot * __cuda_pipeline_extent + #total), #rows * #columns) };
                     let #view = ::cuda_device::shared::BlockTile::new(#guard.as_slice(), 0, #rows, #columns, #columns)#layout;
                 });
-                let threads = self.threads as usize;
-                copies.push(quote! {
-                    // Resolve every source element semantically, including shadowed primitives.
-                    let #name: &[#element] = #name;
-                    let mut __cuda_pipeline_lane = ::cuda_device::thread::threadIdx_x() as ::core::primitive::usize;
-                    while __cuda_pipeline_lane < #rows * #columns {
-                        let __cuda_pipeline_row = __cuda_pipeline_lane / #columns;
-                        let __cuda_pipeline_col = __cuda_pipeline_lane % #columns;
-                        let __cuda_pipeline_src = (#copy_iteration).checked_mul(#rows)
-                            .and_then(|n| n.checked_add(__cuda_pipeline_row))
-                            .and_then(|n| n.checked_mul(#stride))
-                            .and_then(|n| n.checked_add(#offset))
-                            .and_then(|n| n.checked_add(__cuda_pipeline_col));
-                        // SAFETY: lanes partition this writable slot. It is disjoint
-                        // from the current readable slot. Source addresses are checked,
-                        // element alignment is preserved, and the scheduler completes
-                        // every issuing thread's copies before publishing or reusing it.
-                        unsafe {
-                            let dst = #pointer.add(__cuda_pipeline_copy_slot * __cuda_pipeline_extent + #total + #destination);
-                            if let Some(src) = __cuda_pipeline_src.filter(|&n| n < #name.len()) {
-                                #copy(dst.cast::<u32>(), #name.as_ptr().add(src).cast::<u32>());
-                            } else { dst.write(0 as #element); }
-                        }
-                        __cuda_pipeline_lane += #threads;
+                let key = quote! { #columns; #stride; #base }.to_string();
+                let group = if let Some(group) = copy_groups.iter_mut().find(|g| g.key == key) {
+                    group
+                } else {
+                    copy_groups.push(CopyGroup {
+                        key,
+                        columns: columns.clone(),
+                        stride: stride.clone(),
+                        offset: offset.clone(),
+                        types: Vec::new(),
+                        stores: Vec::new(),
+                    });
+                    copy_groups.last_mut().unwrap()
+                };
+                // Check each source's primitive type even when no copy executes.
+                group.types.push(quote! { let #name: &[#element] = #name; });
+                group.stores.push(quote! {
+                    // SAFETY: lanes partition this source's writable region. Other
+                    // sources occupy disjoint regions. Equal layouts share address
+                    // arithmetic, but each source retains its own bounds check.
+                    // The scheduler completes all copies before publication/reuse.
+                    unsafe {
+                        let dst = #pointer.add(__cuda_pipeline_copy_slot * __cuda_pipeline_extent + #total + #destination);
+                        if let Some(src) = __cuda_pipeline_src.filter(|&n| n < #name.len()) {
+                            #copy(dst.cast::<u32>(), #name.as_ptr().add(src).cast::<u32>());
+                        } else { dst.write(0 as #element); }
                     }
                 });
             } else {
@@ -453,6 +463,22 @@ impl BlockPipeline {
             }
             total = quote! { (#total + #rows * #columns) };
         }
+        let copy_threads = self.threads as usize;
+        let copies: Vec<_> = copy_groups.into_iter().map(|CopyGroup { columns, stride, offset, types, stores, .. }| quote! {
+            #(#types)*
+            let mut __cuda_pipeline_lane = ::cuda_device::thread::threadIdx_x() as ::core::primitive::usize;
+            while __cuda_pipeline_lane < #rows * #columns {
+                let __cuda_pipeline_row = __cuda_pipeline_lane / #columns;
+                let __cuda_pipeline_col = __cuda_pipeline_lane % #columns;
+                let __cuda_pipeline_src = (#copy_iteration).checked_mul(#rows)
+                    .and_then(|n| n.checked_add(__cuda_pipeline_row))
+                    .and_then(|n| n.checked_mul(#stride))
+                    .and_then(|n| n.checked_add(#offset))
+                    .and_then(|n| n.checked_add(__cuda_pipeline_col));
+                #(#stores)*
+                __cuda_pipeline_lane += #copy_threads;
+            }
+        }).collect();
         if !staged {
             return syn::parse_quote! {{
                 #(#callbacks)*

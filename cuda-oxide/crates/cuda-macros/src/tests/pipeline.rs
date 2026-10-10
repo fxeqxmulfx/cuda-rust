@@ -134,3 +134,16 @@ fn tile_rows_are_constant_and_layout_names_are_checked() {
         assert!(prepare_pipeline(&mut input).is_err());
     }
 }
+
+#[test]
+fn equal_source_layouts_share_copy_indices_but_keep_separate_bounds() {
+    let mut input = valid();
+    input.sig.inputs.push(parse_quote!(#[tile_source(columns = D, stride = D, offset = 0, layout = xor32)] other: &[f32]));
+    let pipeline = prepare_pipeline(&mut input).unwrap().unwrap();
+    let staged = pipeline.body(true);
+    let body = quote::quote!(#staged).to_string();
+    assert_eq!(body.matches("while __cuda_pipeline_lane").count(), 2);
+    assert_eq!(body.matches("n < input . len").count(), 2);
+    assert_eq!(body.matches("n < other . len").count(), 2);
+    assert_eq!(body.matches("cp_async_ca_4").count(), 4);
+}

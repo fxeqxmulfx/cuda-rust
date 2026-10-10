@@ -567,7 +567,9 @@ type. Their readable bounds and arithmetic overflow are checked; unavailable
 elements are zero-filled. `BlockTile::get` checks row, column, and backing-slice
 bounds. `BlockTile::load` performs the same checks and returns a copied value,
 using its default for unavailable coordinates or overflow. Uniform source offsets
-are evaluated once, and remain unevaluated when there are no iterations. Each iteration advances the source by `rows * stride` elements.
+are evaluated once, and remain unevaluated when there are no iterations.
+Sources with equal columns, stride, and offset share copy-index calculations;
+each retains its own bounds check and disjoint destination region/layout. Each iteration advances the source by `rows * stride` elements.
 
 A source can request `layout = xor32` when its column count is divisible by
 32. The entry stores column `c` of row `r` at

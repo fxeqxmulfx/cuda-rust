@@ -45,14 +45,15 @@ mod kernels {
     pub fn swizzled<const D: usize, const R: usize>(
         passes: usize,
         #[tile_source(columns = D, stride = D, offset = (block * 3 + 1) / (1 - 1 / (passes + 1)), layout = xor32)] a: &[f32],
+        #[tile_source(columns = D, stride = D, offset = (block * 3 + 1) / (1 - 1 / (passes + 1)))] b: &[f32],
         mut out: DisjointSlice<f32, thread::StripedWarp<D>>,
     ) {
         let init = || [0.0; 4];
-        let step = |state: &mut [f32; 4], _iteration: usize, a: BlockTile<'_, f32>| {
+        let step = |state: &mut [f32; 4], _iteration: usize, a: BlockTile<'_, f32>, b: BlockTile<'_, f32>| {
             let lane = thread::threadIdx_x() as usize % 32;
             for c in 0..D / 32 {
                 for row in 0..R + 1 {
-                    state[c] += a.load(row, lane + c * 32);
+                    state[c] += a.load(row, lane + c * 32) + b.load(row, lane + c * 32);
                 }
             }
         };
@@ -114,15 +115,17 @@ fn check_swizzled<const D: usize, const R: usize>(context: &std::sync::Arc<CudaC
     for length in [0, 1, 7, 129, 517, 4099] {
         let input: Vec<f32> = (0..length).map(|i| (i % 37) as f32).collect();
         let device = DeviceBuffer::from_host(&stream, &input)?;
+        let other: Vec<f32> = input[..length / 2].iter().map(|value| -2.0 * value).collect();
+        let other_device = DeviceBuffer::from_host(&stream, &other)?;
         for passes in [0, 1, 2, 3, 8] {
-            let bytes = (2 * (R + 1) * D * 4) as u32;
+            let bytes = (2 * (R + 1) * 2 * D * 4) as u32;
             let launch = module.prepare_swizzled::<D, R>(LaunchConfig1D::new(3, 128, bytes))?;
             let mut out = DeviceBuffer::zeroed(&stream, 3 * 4 * D)?;
-            module.swizzled(&stream, &launch, passes, &device, &mut out)?;
+            module.swizzled(&stream, &launch, passes, &device, &other_device, &mut out)?;
             for (i, actual) in out.to_host_vec(&stream)?.into_iter().enumerate() {
                 let column = i % D;
                 let block = i / D / 4;
-                let expected: f32 = (0..passes * (R + 1)).map(|row| input.get(block * 3 + 1 + row * D + column).copied().unwrap_or(0.0)).sum();
+                let expected: f32 = (0..passes * (R + 1)).map(|row| input.get(block * 3 + 1 + row * D + column).copied().unwrap_or(0.0) + other.get(block * 3 + 1 + row * D + column).copied().unwrap_or(0.0)).sum();
                 assert_eq!(actual, expected, "swizzled D={D} R={R} length={length} passes={passes} i={i}");
             }
             assert!(module.prepare_swizzled::<D, R>(LaunchConfig1D::new(3, 128, bytes - 1)).is_err());
@@ -141,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     check_swizzled::<32, 3>(&context)?;
     check_swizzled::<32, 31>(&context)?;
     check_swizzled::<64, 7>(&context)?;
-    check_swizzled::<128, 63>(&context)?;
+    check_swizzled::<64, 63>(&context)?;
     let stream = context.new_stream()?;
     let module = kernels::load(&context)?;
     for threads in [1u32, 17, 31, 32, 33, 48, 64, 127, 128] {

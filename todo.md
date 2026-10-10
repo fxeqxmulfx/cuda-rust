@@ -9,7 +9,7 @@ Make one commit with a test for each fix.
 
 ## Bugs
 
-- [ ] `just clippy` and `just check` fail because of `clippy::replace_box` in
+- [x] `just clippy` and `just check` fail because of `clippy::replace_box` in
   the [pipeline tests](cuda-oxide/crates/cuda-macros/src/tests/pipeline.rs).
   Write `*input.block = syn::parse2(body).unwrap();`.
 - [ ] A generic kernel specialization is lost when only a library that does not

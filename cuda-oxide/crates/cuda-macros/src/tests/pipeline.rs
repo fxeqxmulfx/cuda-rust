@@ -59,7 +59,7 @@ fn callbacks_cannot_bypass_the_collective_schedule() {
         }),
     ] {
         let mut input = valid();
-        input.block = Box::new(syn::parse2(body).unwrap());
+        *input.block = syn::parse2(body).unwrap();
         assert!(prepare_pipeline(&mut input).is_err());
     }
     for iterations in [

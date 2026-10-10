@@ -7,7 +7,8 @@
 # copy fills the elements out of bounds with zero, so the pipeline kernels have
 # no shared stores. Row-major tiles with 16-byte rows and strides must also
 # have a 16-byte copy. A `BlockTile` with a runtime offset and stride must also
-# check the overflow one time, not for each element.
+# check the overflow one time, not for each element. The `striped_columns` loop
+# must calculate the region of the warp one time, not for each column.
 
 set -euo pipefail
 
@@ -100,6 +101,17 @@ if [[ -n "${checked}" ]]; then
 fi
 if awk '/^\.visible \.entry view_TID_/,/^}/' "${ptx}" | grep -E 'trap' >/dev/null; then
     echo "error: trap in the view kernel of ${ptx}" >&2
+    exit 1
+fi
+
+store='st[.]global[.]'
+if [[ -z "$(loops_with striped "${store}" "${store}")" ]]; then
+    echo "error: no store loop in the striped kernel of ${ptx}" >&2
+    exit 1
+fi
+checked="$(loops_with striped "${store}" '(mad|mul|xor)[.]')"
+if [[ -n "${checked}" ]]; then
+    echo "error: warp region calculation in the store loop of ${ptx}: ${checked}" >&2
     exit 1
 fi
 

@@ -106,20 +106,26 @@ impl FlatIndexSpace for WarpIndex {}
 impl<const N: usize> flat_index_sealed::Sealed for StripedWarp<N> {}
 impl<const N: usize> FlatIndexSpace for StripedWarp<N> {}
 
+/// The flat index of the first column of the lane, and the number of columns
+/// of the lane. `thread < threads`, as on the device. The count is zero when
+/// the region of the warp does not end below `usize::MAX`, the invalid index.
 #[inline(always)]
-fn striped_warp_offset<const N: usize>(
+fn striped_lane_columns<const N: usize>(
     block: usize,
     threads: usize,
     thread: usize,
-    column: usize,
-) -> Option<usize> {
-    if threads == 0 || thread >= threads || column >= N || column % 32 != thread % 32 {
-        return None;
+) -> (usize, usize) {
+    let lane = thread % 32;
+    let base = block
+        .checked_mul(threads.div_ceil(32))
+        .and_then(|warp| warp.checked_add(thread / 32))
+        .and_then(|warp| warp.checked_mul(N))
+        .filter(|base| base.checked_add(N).is_some());
+    match base {
+        // When the count is zero, the first index is not used.
+        Some(base) => (base.wrapping_add(lane), N.saturating_sub(lane).div_ceil(32)),
+        None => (0, 0),
     }
-    let warp = block
-        .checked_mul(threads.div_ceil(32))?
-        .checked_add(thread / 32)?;
-    warp.checked_mul(N)?.checked_add(column)
 }
 
 /// Index spaces whose `ThreadIndex` can be derived from the launch context alone.
@@ -271,7 +277,8 @@ impl<'kernel, Domain, Coordinates> LaunchContext<'kernel, Domain, Coordinates> {
 /// The macros rewrite a small set of names inside annotated bodies so
 /// the user never has to pass the launch context through by hand:
 ///
-/// - free functions: `index_1d`, `index_2d`, `index_2d_runtime`, `warp_index`
+/// - free functions: `index_1d`, `index_2d`, `index_2d_runtime`, `warp_index`,
+///   `striped_columns`
 /// - methods (zero-arg call sites): `get_mut_indexed`
 ///
 /// Free-function calls are matched on path tail, so all of these resolve
@@ -529,6 +536,7 @@ pub mod __internal {
         Index1D, Index2D, LaunchContext, Runtime2DIndex, ThreadCoord2D32, ThreadIndex,
         ThreadIndex32, WarpIndex,
     };
+    use core::marker::PhantomData;
 
     /// Threads per warp on every currently supported target.
     const WARP_SIZE: u32 = 32;
@@ -679,24 +687,28 @@ pub mod __internal {
         unsafe { ThreadIndex::new(raw, valid, scope) }
     }
 
-    /// Mint a lane-owned column in a const-sized warp partition.
+    /// Iterate over the lane-owned columns in a const-sized warp partition.
     #[inline(always)]
-    pub fn striped_index<'kernel, const N: usize>(
+    pub fn striped_columns<'kernel, const N: usize>(
         scope: &'kernel LaunchContext<'kernel, impl LaunchDomain, impl Sized>,
-        column: usize,
-    ) -> Option<ThreadIndex<'kernel, super::StripedWarp<N>>> {
-        if !one_dimensional_launch(scope) {
-            return None;
+    ) -> super::StripedColumns<'kernel, N> {
+        let (raw, remaining) = if one_dimensional_launch(scope) {
+            super::striped_lane_columns::<N>(
+                super::blockIdx_x() as usize,
+                super::blockDim_x() as usize,
+                super::threadIdx_x() as usize,
+            )
+        } else {
+            (0, 0)
+        };
+        // Each physical warp has its own N-element region, including partial
+        // warps. Distinct lanes own different column residues modulo 32.
+        super::StripedColumns {
+            raw,
+            remaining,
+            _kernel: PhantomData,
+            _not_send_sync: PhantomData,
         }
-        let raw = super::striped_warp_offset::<N>(
-            super::blockIdx_x() as usize,
-            super::blockDim_x() as usize,
-            super::threadIdx_x() as usize,
-            column,
-        )?;
-        // SAFETY: each physical warp has its own N-element region, including
-        // partial warps. Distinct lanes own different column residues modulo 32.
-        Some(unsafe { ThreadIndex::new(raw, true, scope) })
     }
 
     /// Real `warp_index` intrinsic the macros call in place of the public
@@ -1051,14 +1063,44 @@ pub fn warp_index<'kernel>() -> Option<ThreadIndex<'kernel, WarpIndex>> {
     )
 }
 
-/// Select a lane-owned column in a warp's N-element region.
-/// Returns None for a column owned by another lane or beyond N. Partial
-/// block warps receive distinct regions. Calls are scoped by #[kernel]/#[device].
+/// Iterate over the witnesses of all columns of the lane in its warp's
+/// N-element region. The iterator calculates the region one time. It is
+/// empty for a launch that is not 1D. Calls are scoped by `#[kernel]` and
+/// `#[device]`.
 #[inline(always)]
-pub fn striped_index<'kernel, const N: usize>(
-    _column: usize,
-) -> Option<ThreadIndex<'kernel, StripedWarp<N>>> {
-    unreachable!("striped_index called outside #[kernel] / #[device]")
+pub fn striped_columns<'kernel, const N: usize>() -> StripedColumns<'kernel, N> {
+    unreachable!("striped_columns called outside #[kernel] / #[device]")
+}
+
+/// The iterator from [`striped_columns`].
+pub struct StripedColumns<'kernel, const N: usize> {
+    /// The flat index of the next column.
+    raw: usize,
+    /// The number of columns that remain.
+    remaining: usize,
+    _kernel: PhantomData<fn(&'kernel mut ()) -> &'kernel mut ()>,
+    _not_send_sync: PhantomData<*mut ()>,
+}
+
+impl<'kernel, const N: usize> Iterator for StripedColumns<'kernel, N> {
+    type Item = ThreadIndex<'kernel, StripedWarp<N>>;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        let raw = self.raw;
+        // This can wrap only after the last column.
+        self.raw = raw.wrapping_add(32);
+        Some(ThreadIndex {
+            raw,
+            _kernel: PhantomData,
+            _space: PhantomData,
+            _not_send_sync: PhantomData,
+        })
+    }
 }
 
 /// Runtime-stride 2D indexing over the slice that supplies the stride.
@@ -1417,29 +1459,58 @@ const fn validate_unroll_factor(factor: u32) {
 
 #[cfg(test)]
 mod striped_tests {
-    use super::striped_warp_offset;
-    #[test]
-    fn striped_ownership_is_unique_for_partial_warps_and_arbitrary_columns() {
+    use super::{StripedColumns, striped_lane_columns};
+    use core::marker::PhantomData;
+
+    fn columns<const N: usize>(
+        block: usize,
+        threads: usize,
+        thread: usize,
+    ) -> StripedColumns<'static, N> {
+        let (raw, remaining) = striped_lane_columns::<N>(block, threads, thread);
+        StripedColumns {
+            raw,
+            remaining,
+            _kernel: PhantomData,
+            _not_send_sync: PhantomData,
+        }
+    }
+
+    fn check<const N: usize>() {
         for threads in [1, 17, 31, 32, 33, 48, 64, 127, 128] {
             let mut seen = [false; 3 * 4 * 65];
             for block in 0..3 {
                 for thread in 0..threads {
-                    for column in 0..100 {
-                        if let Some(offset) =
-                            striped_warp_offset::<65>(block, threads, thread, column)
-                        {
-                            assert_eq!(column % 32, thread % 32);
-                            assert!(!seen[offset], "threads={threads} offset={offset}");
-                            seen[offset] = true;
-                        } else {
-                            assert!(column >= 65 || column % 32 != thread % 32);
-                        }
+                    let mut count = 0;
+                    for index in columns::<N>(block, threads, thread) {
+                        let raw = index.get();
+                        assert_eq!(raw / N, block * threads.div_ceil(32) + thread / 32);
+                        assert_eq!(raw % N, thread % 32 + 32 * count);
+                        assert!(!seen[raw], "N={N} threads={threads} raw={raw}");
+                        seen[raw] = true;
+                        count += 1;
                     }
+                    assert_eq!(count, (thread % 32..N).step_by(32).count());
                 }
             }
         }
-        assert_eq!(striped_warp_offset::<0>(0, 32, 0, 0), None);
-        assert_eq!(striped_warp_offset::<64>(usize::MAX, 64, 0, 0), None);
-        assert_eq!(striped_warp_offset::<64>(0, 32, 32, 0), None);
+    }
+
+    #[test]
+    fn striped_columns_are_unique_and_complete_for_partial_warps() {
+        check::<0>();
+        check::<1>();
+        check::<31>();
+        check::<32>();
+        check::<33>();
+        check::<65>();
+        // The region of the warp does not end below `usize::MAX`.
+        assert_eq!(striped_lane_columns::<64>(usize::MAX, 64, 0), (0, 0));
+        assert_eq!(
+            striped_lane_columns::<{ usize::MAX / 2 + 1 }>(0, 64, 32),
+            (0, 0)
+        );
+        // The lane is at or after N, and the first index wraps.
+        assert_eq!(striped_lane_columns::<1>(usize::MAX - 1, 32, 31).1, 0);
     }
 }

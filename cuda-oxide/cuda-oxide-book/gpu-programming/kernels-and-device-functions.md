@@ -590,7 +590,8 @@ callback must not interfere with the reserved barrier or shared storage.
 For warp-distributed outputs, use
 `DisjointSlice<T, thread::StripedWarp<N>>`. Physical warp `w` owns its `N`
 consecutive elements, and lane `l` owns columns `l`, `l + 32`, and so on.
-`thread::striped_index::<N>(column)` returns a scoped write witness only for a
-column owned by the current lane. `N` is fixed for the slice lifetime; changing
+`thread::striped_columns::<N>()` gives an iterator over the scoped write
+witnesses of all columns of the current lane. The iterator calculates the
+region of the warp one time. `N` is fixed for the slice lifetime; changing
 it cannot create overlapping ownership. Physical warp numbering accounts for
 partial warps in arbitrary 1D blocks.

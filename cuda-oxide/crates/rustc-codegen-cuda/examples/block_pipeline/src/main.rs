@@ -38,13 +38,9 @@ mod kernels {
             }
         };
         let mut finish = |state: [f32; 4]| {
-            for c in 0..D.div_ceil(32) {
-                if let Some(index) =
-                    thread::striped_index::<D>(thread::threadIdx_x() as usize % 32 + c * 32)
-                {
-                    if let Some(value) = out.get_mut(index) {
-                        *value = state[c];
-                    }
+            for (index, sum) in thread::striped_columns::<D>().zip(state) {
+                if let Some(value) = out.get_mut(index) {
+                    *value = sum;
                 }
             }
         };
@@ -74,13 +70,9 @@ mod kernels {
             }
         };
         let mut finish = |state: [f32; 4]| {
-            for c in 0..D / 32 {
-                if let Some(index) =
-                    thread::striped_index::<D>(thread::threadIdx_x() as usize % 32 + c * 32)
-                {
-                    if let Some(value) = out.get_mut(index) {
-                        *value = state[c];
-                    }
+            for (index, sum) in thread::striped_columns::<D>().zip(state) {
+                if let Some(value) = out.get_mut(index) {
+                    *value = sum;
                 }
             }
         };
@@ -109,12 +101,10 @@ mod kernels {
     #[launch_bounds(128)]
     #[launch_contract(domain = 1)]
     pub fn striped<const D: usize>(mut out: DisjointSlice<f32, thread::StripedWarp<D>>) {
-        for column in 0..D + 13 {
-            if let Some(index) = thread::striped_index::<D>(column) {
-                let raw = index.get();
-                if let Some(value) = out.get_mut(index) {
-                    *value = (raw + 1) as f32;
-                }
+        for index in thread::striped_columns::<D>() {
+            let raw = index.get();
+            if let Some(value) = out.get_mut(index) {
+                *value = (raw + 1) as f32;
             }
         }
     }

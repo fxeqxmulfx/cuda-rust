@@ -60,7 +60,7 @@ On sm_80 and later, `#[block_pipeline]` copies the `#[tile_source]` slices with
 - When the rows, the stride and the tile address are 16-byte aligned, a tile
   without the XOR layout uses 16-byte `cp.async.cg`.
 
-`DisjointSlice<T, thread::StripedWarp<N>>` and `thread::striped_index` give
+`DisjointSlice<T, thread::StripedWarp<N>>` and `thread::striped_columns` give
 warp-striped writes.
 
 Commits: `f6702b7c`, `c9c1706a`, `c80ea119`, `65a073c7`, `c74a9823`,

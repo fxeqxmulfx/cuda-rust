@@ -54,7 +54,7 @@ after each device fix.
 - [x] The pipeline copies 4 or 8 bytes with each `cp.async.ca`. Add a 16-byte
   `cp.async.cg` path when `columns` and `stride` are multiples of 16 bytes.
   Check the alignment of the source address one time for each tile.
-- [ ] Each [`striped_index`](cuda-oxide/crates/cuda-device/src/thread.rs) call
+- [x] Each [`striped_index`](cuda-oxide/crates/cuda-device/src/thread.rs) call
   checks `thread >= threads`, which cannot occur, and checks that the lane owns
   the column. It also calculates the warp base again. Add an iterator over the
   columns of the lane that calculates the base one time.

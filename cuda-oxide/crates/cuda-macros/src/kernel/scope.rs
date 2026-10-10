@@ -221,9 +221,9 @@ struct ScopedIntrinsic {
 
 const SCOPED_INTRINSICS: &[ScopedIntrinsic] = &[
     ScopedIntrinsic {
-        name: "striped_index",
+        name: "striped_columns",
         preserve_turbofish: true,
-        forward_args: true,
+        forward_args: false,
     },
     ScopedIntrinsic {
         name: "index_1d",

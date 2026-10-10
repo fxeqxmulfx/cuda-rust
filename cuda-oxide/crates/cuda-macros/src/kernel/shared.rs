@@ -317,7 +317,8 @@ impl BlockShared {
             while #lane < #length {
                 // SAFETY: each lane owns a disjoint sequence in 0..length.
                 // Unused capacity is never exposed through the borrowed slice.
-                unsafe { #pointer.add(#lane).write(#source[#base + #lane]); }
+                // `length <= len - base`, so the source index is in bounds.
+                unsafe { #pointer.add(#lane).write(*#source.get_unchecked(#base + #lane)); }
                 #lane += #step;
             }
             // Every launched thread reaches this barrier before any user code.

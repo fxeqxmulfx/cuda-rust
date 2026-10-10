@@ -61,4 +61,15 @@ for kernel in 'neighbor_u32(' 'shared_TID_'; do
     reject_entry_shape "${kernel}" "generic tile load" "${generic_load}"
 done
 
+# The loop condition of the copy keeps the source index in bounds, so the copy
+# needs no bounds check. The other traps of the staged kernel must also occur
+# in the global control kernel.
+reject_entry_shape 'neighbor_u32(' "bounds check trap" 'trap'
+staged_traps="$(entry_body 'shared_TID_' | grep -c 'trap' || true)"
+control_traps="$(entry_body 'global_TID_' | grep -c 'trap' || true)"
+if (( staged_traps > control_traps )); then
+    echo "error: ${ptx}:shared_TID_ has ${staged_traps} traps, global_TID_ has ${control_traps}" >&2
+    exit 1
+fi
+
 echo "block_shared code shape: PASS"

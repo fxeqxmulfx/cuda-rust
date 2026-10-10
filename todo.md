@@ -41,7 +41,7 @@ after each device fix.
   branch: `from_raw_parts` accepts a length of zero with a non-null, aligned
   pointer. A test without the branch gave `ld.shared` for all four loads of
   `block_shared`.
-- [ ] The `#[block_shared]` copy loop in
+- [x] The `#[block_shared]` copy loop in
   [`BlockShared::prologue`](cuda-oxide/crates/cuda-macros/src/kernel/shared.rs)
   does a bounds check with a `trap` for each element. The loop condition
   already gives `base + lane < len`. Use `get_unchecked`.

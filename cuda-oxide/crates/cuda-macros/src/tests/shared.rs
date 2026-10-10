@@ -115,6 +115,7 @@ fn shared_staging_uses_checked_block_sizes_and_only_initializes_live_elements() 
                 .contains("shared_length")
         );
         assert!(!quote::quote!(#loop_).to_string().contains("else"));
+        assert!(quote::quote!(#loop_).to_string().contains("get_unchecked"));
         let prefix = prefix.to_string();
         assert_eq!(!prefix.contains("blockDim_x"), constant_stride);
         assert_eq!(prefix.matches("sync_threads").count(), 1);

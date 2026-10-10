@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Ready: Changes in the `experiments` Branch
 
 These changes are in `experiments` and not in `main`. [`todo.md`](todo.md)
-lists the fixes that are not done.
+lists the fixes for this branch.
 
 ## Features
 
@@ -31,9 +31,9 @@ Commit: `760d4aa3`.
 no constants. The load merges the PTX bundles of the image that contains the
 artifact anchor of the module. It checks the mapped file and rejects two
 definitions of one entry. Entry names with `_TID_` are reserved for generic
-specializations.
+specializations. The load merges only the bundles that the module needs.
 
-Commits: `080c5b8b`, `5db1b0f8`.
+Commits: `080c5b8b`, `5db1b0f8`, `9d9b784f`, `cbbd5d0a`.
 
 ### Staged Block Tiles
 
@@ -42,7 +42,8 @@ the slice to shared memory before the user code. The user code gets a
 read-only slice of the tile. The tile reads use `ld.shared`, and the copy has
 no bounds check.
 
-Commits: `fe3f4bb7`, `99674beb`, `88cd281d`, `5043589d`.
+Commits: `fe3f4bb7`, `99674beb`, `88cd281d`, `5043589d`, `1f75e2f6`,
+`0e3d1c88`.
 
 ### Async Tile Pipelines
 
@@ -59,20 +60,32 @@ On sm_80 and later, `#[block_pipeline]` copies the `#[tile_source]` slices with
   elements out of bounds with zero.
 - When the rows, the stride and the tile address are 16-byte aligned, a tile
   without the XOR layout uses 16-byte `cp.async.cg`.
+- `BlockTile::new` and `BlockTile::new_xor32` check the limits one time. Each
+  access then compares only the index with the slice length.
 
 `DisjointSlice<T, thread::StripedWarp<N>>` and `thread::striped_columns` give
 warp-striped writes.
 
 Commits: `f6702b7c`, `c9c1706a`, `c80ea119`, `65a073c7`, `c74a9823`,
-`b13e2b56`, `2aa79806`.
+`b13e2b56`, `2aa79806`, `deb6d490`, `4ab506b6`, `ca9a5221`, `efd96b2e`,
+`1f75e2f6`, `0e3d1c88`, `4fe4f768`.
 
 ### FP8 on Pre-Hopper GPUs (cutile)
 
-On sm_80 to sm_89, cutile stores E4M3FN and E5M2 values as `i8` and converts
-them with integer and float operations. Arithmetic on FP8 values gives an
-error. sm_90 and later targets keep native FP8.
+On sm_80 to sm_89, `CompileOptions::fp8_emulation(true)` makes cutile store
+E4M3FN and E5M2 values as `i8` and convert them with integer and float
+operations. Arithmetic on FP8 values gives an error. Without the option, FP8
+on these targets gives the capability error. sm_90 and later targets keep
+native FP8.
 
-Commit: `eaae51de`.
+Commits: `eaae51de`, `ee795750`.
+
+### Ampere BF16 GEMM Comparison
+
+The `gemm_compare` example compares naive, shared-memory and Tensor Core BF16
+GEMM kernels with cuBLAS on Ampere.
+
+Commit: `91aa65df`.
 
 ## Fixes
 
@@ -83,10 +96,34 @@ Commit: `eaae51de`.
 - The merge renames the device functions and the module-scope variables of
   each bundle. Thus equal names in two bundles do not collide.
 - A `.extern` declaration links to the `.visible` definition in another bundle.
-- Only the first bundle with DWARF sections keeps them. Before, ptxas did not
-  assemble a merged module with different abbreviation tables.
+- The DWARF sections of all bundles go to the end of the module, with one
+  abbreviation table. Before, ptxas did not assemble a merged module with
+  different abbreviation tables.
+- The PTX edits are sorted. Before, a merge was O(n²) in the number of edits.
+- The entry registry uses the entry names of the merge. Before, it parsed the
+  merged PTX again.
 
-Commits: `bd060dae`, `b861e347`, `17e16979`, `5791e688`, `0d17fdd5`.
+Commits: `bd060dae`, `b861e347`, `17e16979`, `5791e688`, `0d17fdd5`,
+`90e4e7bc`, `fa133758`, `e36baf18`.
+
+### Generic Specializations in Libraries
+
+A library that instantiates a generic kernel, but does not define it, puts the
+specialization in its own PTX bundle. No symbol referred to this bundle, thus
+the linker did not keep it, and the load did not find the entry. Now the
+backend keeps the bundle of each library with a specialization. When two
+bundles define the same specialization, the merge keeps the first definition.
+
+Commit: `0fa26d77`.
+
+### Zero-Sized Fields of Newtypes
+
+rustc can split a `ThreadIndex` local into its fields, for example for the
+item of a `for` loop. The verifier rejected the extract of a `PhantomData`
+field, and the kernel did not compile. Now the verifier accepts a zero-sized
+field, and the lowering gives `undef` for it.
+
+Commit: `d253a0e8`.
 
 ### Inline Policy of Generic Device Functions
 
@@ -119,3 +156,8 @@ Commit: `fe2795cd`.
   Commit: `e8f6af97`.
 - CUDA 13.4.2, LLVM 23, Nix, GitHub Actions and documentation tools. Commit:
   `126d8619`.
+- A CI job tests the codegen with LLVM 21, the documented minimum. Commit:
+  `7c8f3afd`.
+- No `DynamicSharedArray` warning of the collector, and no unused workspace
+  dependencies in cuda-oxide. Commits: `57a0480a`, `571c0c4b`.
+- syn 3.0.6 in all example locks. Commit: `92d1d43a`.

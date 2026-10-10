@@ -42,10 +42,12 @@ use crate::translator::payload_store;
 use crate::translator::rvalue;
 use crate::translator::values::ValueMap;
 use dialect_mir::ops::{
-    MirMemcpyOp, MirSetDiscriminantOp, MirStorageDeadOp, MirStorageLiveOp, MirStoreOp,
+    MirCallOp, MirMemcpyOp, MirSetDiscriminantOp, MirStorageDeadOp, MirStorageLiveOp, MirStoreOp,
 };
+use dialect_mir::rust_intrinsics;
 use dialect_mir::types::MirEnumType;
 use pliron::basic_block::BasicBlock;
+use pliron::builtin::attributes::StringAttr;
 use pliron::builtin::types::{IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::location::{Located, Location};
@@ -857,8 +859,36 @@ pub fn translate_statement(
         | mir::StatementKind::Coverage(..)
         | mir::StatementKind::ConstEvalCounter => Ok(prev_op),
 
-        // `Assume` is an optimisation hint with no observable effect; safe to skip.
-        mir::StatementKind::Intrinsic(mir::NonDivergingIntrinsic::Assume(_)) => Ok(prev_op),
+        // `Assume` gives LLVM a fact, as rustc does with `llvm.assume`. It has
+        // no observable effect and makes no instructions.
+        mir::StatementKind::Intrinsic(mir::NonDivergingIntrinsic::Assume(condition)) => {
+            let (condition, last_op) = rvalue::translate_operand(
+                ctx,
+                body,
+                condition,
+                value_map,
+                block_ptr,
+                prev_op,
+                loc.clone(),
+            )?;
+            let assume_op = Operation::new(
+                ctx,
+                MirCallOp::get_concrete_op_info(),
+                vec![],
+                vec![condition],
+                vec![],
+                0,
+            );
+            assume_op.deref_mut(ctx).set_loc(loc);
+            MirCallOp::new(assume_op)
+                .set_attr_callee(ctx, StringAttr::new(rust_intrinsics::CALLEE_ASSUME.into()));
+            if let Some(prev) = last_op {
+                assume_op.insert_after(ctx, prev);
+            } else {
+                assume_op.insert_at_front(block_ptr, ctx);
+            }
+            Ok(Some(assume_op))
+        }
 
         mir::StatementKind::Intrinsic(mir::NonDivergingIntrinsic::CopyNonOverlapping(copy)) => {
             let (dst, last_op) = rvalue::translate_operand(

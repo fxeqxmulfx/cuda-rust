@@ -350,6 +350,7 @@ impl<'a, T, IndexSpace: SpaceLayout<Data = ()>> DisjointSlice<'a, T, IndexSpace>
     /// # Safety
     ///
     /// The caller must ensure:
+    /// - `ptr` is not null, also when `len` is 0
     /// - `ptr` points to valid, aligned memory for `len` elements of type `T`
     /// - The memory will remain valid and not be deallocated for lifetime `'a`
     /// - **Exclusive access**: no other live `DisjointSlice<T>` (or `&mut [T]`,
@@ -400,6 +401,18 @@ impl<'a, T, IndexSpace: SpaceLayout> DisjointSlice<'a, T, IndexSpace> {
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut T {
         self.ptr
+    }
+
+    /// Tell LLVM that the pointer is not null.
+    ///
+    /// `None` of `Option<&mut T>` is a null pointer. Without this fact, the
+    /// caller compares the reference with null after the bounds check. Call
+    /// this before the bounds check: LLVM removes an assumption in a branch
+    /// when it merges the branch.
+    #[inline(always)]
+    fn assume_not_null(&self) {
+        // SAFETY: `from_raw_parts` requires a pointer that is not null.
+        unsafe { core::hint::assert_unchecked(!self.ptr.is_null()) }
     }
 
     /// Get a mutable reference to an element at a raw index, without
@@ -494,6 +507,7 @@ impl<'a, T, IndexSpace: FlatIndexSpace + SpaceLayout> DisjointSlice<'a, T, Index
     #[cfg_attr(cuda_oxide_internal_outline_disjoint_get_mut_v1, inline(never))]
     #[cfg_attr(not(cuda_oxide_internal_outline_disjoint_get_mut_v1), inline)]
     pub fn get_mut<'kernel>(&mut self, idx: ThreadIndex<'kernel, IndexSpace>) -> Option<&mut T> {
+        self.assume_not_null();
         let i = idx.get();
         if size_of::<T>() != 0 && idx.is_valid() && i < self.len {
             // SAFETY:
@@ -563,6 +577,7 @@ impl<'a, T> DisjointSlice<'a, T, Runtime2DIndex> {
         &mut self,
         idx: ThreadIndex<'kernel, Runtime2DIndex>,
     ) -> Option<&mut T> {
+        self.assume_not_null();
         if size_of::<T>() == 0 || !idx.is_valid() {
             return None;
         }
@@ -649,6 +664,7 @@ impl<'a, T, IS: IndexFormula + SpaceLayout> DisjointSlice<'a, T, IS> {
     where
         Domain: crate::thread::__internal::LaunchDomain,
     {
+        self.assume_not_null();
         let idx = IS::from_scope(scope)?;
         let i = idx.get();
         if size_of::<T>() != 0 && i < self.len {

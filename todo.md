@@ -24,7 +24,7 @@ Make one commit with a test for each fix.
 
 ## Zero Cost
 
-- [ ] `DisjointSlice::get_mut` returns `Option<&mut T>`. `None` is a null
+- [x] `DisjointSlice::get_mut` returns `Option<&mut T>`. `None` is a null
   pointer, thus the caller compares the reference with null. After the bounds
   check, the PTX still compares the slice pointer with null. In the PTX of
   `vecadd`, this is `setp.eq.b64` with `cvta.to.global` of 0. `main` has the

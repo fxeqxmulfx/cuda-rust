@@ -335,6 +335,25 @@ fn verify_known_placeholder(
     callee_name: &str,
 ) -> Result<(), Error> {
     let op = call.get_operation().deref(ctx);
+    let is_bool = |index: usize| {
+        op.get_operand(index)
+            .get_type(ctx)
+            .deref(ctx)
+            .downcast_ref::<IntegerType>()
+            .is_some_and(|integer| {
+                integer.width() == 1 && integer.signedness() == Signedness::Signless
+            })
+    };
+
+    if callee_name == rust_intrinsics::CALLEE_ASSUME {
+        if op.get_num_operands() != 1 || op.get_num_results() != 0 || !is_bool(0) {
+            return verify_err!(
+                op.loc(),
+                "assume placeholder requires one signless i1 operand and no result"
+            );
+        }
+        return Ok(());
+    }
 
     if callee_name == rust_intrinsics::CALLEE_SELECT_UNPREDICTABLE {
         if op.get_num_operands() != 3 || op.get_num_results() != 1 {
@@ -343,14 +362,7 @@ fn verify_known_placeholder(
                 "select_unpredictable placeholder requires three operands and one result"
             );
         }
-        let condition_type = op.get_operand(0).get_type(ctx);
-        let condition_type = condition_type.deref(ctx);
-        let valid_condition = condition_type
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|integer| {
-                integer.width() == 1 && integer.signedness() == Signedness::Signless
-            });
-        if !valid_condition {
+        if !is_bool(0) {
             return verify_err!(
                 op.loc(),
                 "select_unpredictable placeholder condition must be signless i1"
@@ -875,6 +887,49 @@ mod tests {
             nested_mismatch.verify(&ctx).is_err(),
             "exact equality must recurse through aggregate pointer carriers"
         );
+    }
+
+    #[test]
+    fn assume_placeholder_takes_one_bool_and_no_result() {
+        let mut ctx = Context::new();
+        crate::register(&mut ctx);
+        let module = ModuleOp::new(&mut ctx, "assume_calls".try_into().unwrap());
+        let module_block = module_top_block(&mut ctx, &module);
+        let bool_ty: TypeHandle = IntegerType::get(&ctx, 1, Signedness::Signless).into();
+        let word_ty: TypeHandle = IntegerType::get(&ctx, 32, Signedness::Unsigned).into();
+        let (_, entry) = append_function(
+            &mut ctx,
+            module_block,
+            "caller",
+            vec![bool_ty, word_ty],
+            vec![],
+        );
+        let condition = entry.deref(&ctx).get_argument(0);
+        let word = entry.deref(&ctx).get_argument(1);
+
+        let assume = append_call(
+            &mut ctx,
+            entry,
+            rust_intrinsics::CALLEE_ASSUME,
+            vec![condition],
+            vec![],
+        );
+        assert!(assume.verify(&ctx).is_ok());
+
+        for (operands, results) in [
+            (vec![word], vec![]),
+            (vec![condition], vec![bool_ty]),
+            (vec![condition, condition], vec![]),
+        ] {
+            let call = append_call(
+                &mut ctx,
+                entry,
+                rust_intrinsics::CALLEE_ASSUME,
+                operands,
+                results,
+            );
+            assert!(call.verify(&ctx).is_err());
+        }
     }
 
     #[test]

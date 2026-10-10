@@ -108,6 +108,62 @@ fn integer_minmax_preserves_signedness_and_width_on_both_backends() -> Result<()
 }
 
 #[test]
+fn assume_lowers_to_llvm_assume_on_both_backends() -> Result<(), anyhow::Error> {
+    use dialect_mir::rust_intrinsics::CALLEE_ASSUME;
+    use pliron::builtin::attributes::StringAttr;
+    use pliron::builtin::types::{IntegerType, Signedness};
+    use pliron::common_traits::Verify;
+    use pliron::r#type::TypeHandle;
+
+    for backend in [
+        mir_lower::IntrinsicBackend::LlvmNvptx,
+        mir_lower::IntrinsicBackend::LibNvvm,
+    ] {
+        let mut ctx = make_test_ctx();
+        let bool_ty: TypeHandle = IntegerType::get(&ctx, 1, Signedness::Signless).into();
+        let (module, entry) = build_test_kernel(&mut ctx, vec![bool_ty]);
+        let condition = entry.deref(&ctx).get_argument(0);
+        let op = Operation::new(
+            &mut ctx,
+            mir::MirCallOp::get_concrete_op_info(),
+            vec![],
+            vec![condition],
+            vec![],
+            0,
+        );
+        mir::MirCallOp::new(op).set_attr_callee(&ctx, StringAttr::new(CALLEE_ASSUME.to_string()));
+        op.insert_at_back(entry, &ctx);
+        append_return(&mut ctx, entry);
+        mir_lower::lower_mir_to_llvm_with_options(
+            &mut ctx,
+            module,
+            mir_lower::LoweringOptions {
+                intrinsic_backend: backend,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        module
+            .deref(&ctx)
+            .verify(&ctx)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let calls: Vec<_> = lowered_kernel_body(&ctx, module)
+            .into_iter()
+            .filter_map(|op| Operation::get_op::<llvm::CallOp>(op, &ctx))
+            .collect();
+        let [call] = calls.as_slice() else {
+            panic!("expected one call, found {}", calls.len());
+        };
+        let CallOpCallable::Direct(callee) = call.callee(&ctx) else {
+            panic!("llvm.assume must be a direct call");
+        };
+        assert_eq!(callee.to_string(), "llvm_assume");
+        assert_eq!(call.get_operation().deref(&ctx).get_operand(0), condition);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_fast_float_intrinsics_lower_to_explicit_fast_binops() -> Result<(), anyhow::Error> {
     use dialect_mir::rust_intrinsics;
     use llvm_export::attributes::{FastmathFlags, FastmathFlagsAttr};

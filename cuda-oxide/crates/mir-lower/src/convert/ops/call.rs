@@ -642,6 +642,10 @@ pub fn convert(
         return convert_rust_select_unpredictable(ctx, rewriter, op);
     }
 
+    if callee_name == rust_intrinsics::CALLEE_ASSUME {
+        return convert_rust_assume(ctx, rewriter, op);
+    }
+
     if matches!(
         callee_name.as_str(),
         rust_intrinsics::CALLEE_INTEGER_MIN | rust_intrinsics::CALLEE_INTEGER_MAX
@@ -865,6 +869,41 @@ fn convert_rust_select_unpredictable(
     let select = llvm::SelectOp::new(ctx, *cond, *true_val, *false_val);
     rewriter.insert_operation(ctx, select.get_operation());
     rewriter.replace_operation(ctx, op, select.get_operation());
+    Ok(())
+}
+
+/// Lower the `Assume` placeholder to `llvm.assume`, which makes no
+/// instructions.
+fn convert_rust_assume(
+    ctx: &mut Context,
+    rewriter: &mut DialectConversionRewriter,
+    op: Ptr<Operation>,
+) -> Result<()> {
+    let loc = op.deref(ctx).loc();
+    let args: Vec<Value> = op.deref(ctx).operands().collect();
+    let [condition] = args[..] else {
+        return pliron::input_err!(loc, "assume expects exactly one operand");
+    };
+    let void_ty = llvm_types::VoidType::get(ctx);
+    let func_ty =
+        llvm_types::FuncType::get(ctx, void_ty.into(), vec![condition.get_type(ctx)], false);
+    let parent_block = op
+        .deref(ctx)
+        .get_parent_block()
+        .ok_or_else(|| pliron::input_error!(loc.clone(), "assume call has no parent block"))?;
+    helpers::ensure_intrinsic_declared(ctx, parent_block, "llvm_assume", func_ty)
+        .map_err(|e| pliron::input_error!(loc.clone(), "Failed to declare intrinsic: {e}"))?;
+
+    let sym_name: pliron::identifier::Identifier = "llvm_assume".try_into().unwrap();
+    let llvm_call = llvm::CallOp::new(
+        ctx,
+        CallOpCallable::Direct(sym_name),
+        func_ty,
+        vec![condition],
+    );
+    crate::convert::preserve_location(ctx, op, llvm_call.get_operation());
+    rewriter.insert_operation(ctx, llvm_call.get_operation());
+    rewriter.erase_operation(ctx, op);
     Ok(())
 }
 

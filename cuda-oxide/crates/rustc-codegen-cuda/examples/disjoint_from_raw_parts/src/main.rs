@@ -53,8 +53,8 @@ mod kernels {
     ///
     /// # Safety
     ///
-    /// `ptr` addresses `len` writable elements, and the launch gives each
-    /// thread one of them.
+    /// `ptr` is not null and addresses `len` writable elements, and the
+    /// launch gives each thread one of them.
     #[kernel]
     pub unsafe fn increment_from_raw_parts(ptr: *mut f32, len: usize) {
         let mut view = unsafe { DisjointSlice::from_raw_parts(ptr, len) };
@@ -76,8 +76,8 @@ mod kernels {
     ///
     /// # Safety
     ///
-    /// `ptr` addresses `len` writable elements and `row_width` describes the
-    /// grid the launch covers.
+    /// `ptr` is not null and addresses `len` writable elements, and
+    /// `row_width` describes the grid the launch covers.
     #[kernel]
     pub unsafe fn scale_row_width_slice(ptr: *mut f32, len: usize, row_width: u32) {
         let mut grid = unsafe { DisjointSlice::from_raw_parts_with_space(ptr, len, row_width) };

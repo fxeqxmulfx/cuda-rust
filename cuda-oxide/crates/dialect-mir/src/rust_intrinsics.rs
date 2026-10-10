@@ -239,6 +239,13 @@ pub const CALLEE_FREM_FAST: &str = placeholder!("frem_fast");
 /// no device semantics and is dropped.
 pub const CALLEE_SELECT_UNPREDICTABLE: &str = placeholder!("select_unpredictable");
 
+/// Placeholder call used for the MIR `Assume` statement, which
+/// `core::intrinsics::assume` and `core::hint::assert_unchecked` make.
+///
+/// The call has one `i1` operand and no result. It lowers to `llvm.assume`,
+/// which makes no instructions.
+pub const CALLEE_ASSUME: &str = placeholder!("assume");
+
 /// Return whether `callee` is one of the exact internal Rust-intrinsic
 /// placeholders understood by MIR lowering.
 ///
@@ -275,6 +282,7 @@ pub fn is_known_placeholder(callee: &str) -> bool {
                 | CALLEE_FDIV_FAST
                 | CALLEE_FREM_FAST
                 | CALLEE_SELECT_UNPREDICTABLE
+                | CALLEE_ASSUME
         )
 }
 
@@ -508,6 +516,7 @@ mod tests {
         CALLEE_FDIV_FAST,
         CALLEE_FREM_FAST,
         CALLEE_SELECT_UNPREDICTABLE,
+        CALLEE_ASSUME,
         "__cuda_oxide_rust_intrinsic_unknown",
         "__nv_sinf",
     ];

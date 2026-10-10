@@ -10,6 +10,7 @@ use crate::common::{attr_path_ends_with, internal_ident};
 use crate::cuda_module::launchers::{
     codegen_generic_arguments, generic_arguments, generic_phantom_type,
 };
+use crate::kernel::pipeline::take_pipeline;
 use crate::kernel::scope::{
     append_kernel_scope_parameter, explicit_kernel_scope, explicit_kernel_scope_bindings,
     find_closure_generic, find_closure_param, forwarding_inputs, inject_thread_index_scope,
@@ -40,6 +41,15 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
     mut input: ItemFn,
     explicit_scope: Option<Ident>,
 ) -> TokenStream2 {
+    let pipeline = match take_pipeline(&mut input) {
+        Ok(pipeline) => pipeline,
+        Err(error) => return error.to_compile_error(),
+    };
+    let mut pipeline_entry = pipeline.as_ref().map(|pipeline| {
+        let mut entry = input.clone();
+        *entry.block = pipeline.body(true);
+        entry
+    });
     let shared = match take_block_shared(&mut input) {
         Ok(shared) => shared,
         Err(error) => return error.to_compile_error(),
@@ -60,6 +70,11 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
     } else {
         rewrite_thread_index_calls(&mut input, false)
     };
+    if let Some(entry) = &mut pipeline_entry
+        && let Some(scope) = &rewritten_scope
+    {
+        crate::kernel::scope::rewrite_thread_index_calls_with_scope(entry, &scope.ident, true);
+    }
     if let Some(scope) = &rewritten_scope {
         append_kernel_scope_parameter(&mut input, scope);
     }
@@ -89,7 +104,7 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
     // The entry calls the hidden twin, so a private opted kernel's user-named
     // helper may otherwise be dead code; it stays emitted (bounds-checked)
     // for other device code to call.
-    let helper_dead_code = if unchecked_indexing {
+    let helper_dead_code = if unchecked_indexing || pipeline.is_some() {
         quote! { #[allow(dead_code)] }
     } else {
         quote! {}
@@ -211,10 +226,28 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
     };
     let implementation_call =
         quote! { #implementation_target #kernel_turbofish (#(#implementation_args),*) };
-    let implementation_call = if matches!(unsafety, syn::Safety::Unsafe(_)) {
+    let mut implementation_call = if matches!(unsafety, syn::Safety::Unsafe(_)) {
         quote! { unsafe { #implementation_call } }
     } else {
         implementation_call
+    };
+
+    let entry_unsafety = if let Some(entry) = &pipeline_entry {
+        let bindings = entry_inputs
+            .iter()
+            .zip(&arg_names)
+            .map(|(input, argument)| {
+                let FnArg::Typed(input) = input else {
+                    unreachable!()
+                };
+                let pattern = &input.pat;
+                quote! { let #pattern = #argument; }
+            });
+        let body = &entry.block;
+        implementation_call = quote! { #(#bindings)* #body };
+        quote! { unsafe }
+    } else {
+        entry_unsafety
     };
 
     quote! {
@@ -321,6 +354,18 @@ pub(super) fn generate_simple_kernel(
     mut input: ItemFn,
     explicit_scope: Option<Ident>,
 ) -> TokenStream {
+    if input
+        .attrs
+        .iter()
+        .any(|a| attr_path_ends_with(a, "block_pipeline"))
+    {
+        return syn::Error::new_spanned(
+            &input.sig,
+            "block_pipeline currently requires a generic typed kernel entry",
+        )
+        .to_compile_error()
+        .into();
+    }
     let shared = match take_block_shared(&mut input) {
         Ok(shared) => shared,
         Err(error) => return error.to_compile_error().into(),

@@ -1,0 +1,19 @@
+error: lifetime may not live long enough
+  --> tests/compile_fail/block_pipeline_escape.rs:11:90
+   |
+11 |     let step = |state: &mut Option<&f32>, _iteration: usize, tile: BlockTile<'_, f32>| { *state = tile.get(0, 0); };
+   |                                    -                         ----                        ^^^^^^^^^^^^^^^^^^^^^^^ assignment requires that `'1` must outlive `'2`
+   |                                    |                         |
+   |                                    |                         has type `BlockTile<'1, f32>`
+   |                                    let's call the lifetime of this reference `'2`
+
+error[E0597]: `tile` does not live long enough
+  --> tests/compile_fail/block_pipeline_escape.rs:11:99
+   |
+11 |     let step = |state: &mut Option<&f32>, _iteration: usize, tile: BlockTile<'_, f32>| { *state = tile.get(0, 0); };
+   |                                    -                         ----                        ---------^^^^----------   - `tile` dropped here while still borrowed
+   |                                    |                         |                           |        |
+   |                                    |                         |                           |        borrowed value does not live long enough
+   |                                    |                         |                           assignment requires that `tile` is borrowed for `'2`
+   |                                    |                         binding `tile` declared here
+   |                                    let's call the lifetime of this reference `'2`

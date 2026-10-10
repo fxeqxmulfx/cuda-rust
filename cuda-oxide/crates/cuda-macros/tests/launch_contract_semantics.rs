@@ -8,6 +8,9 @@
 #[test]
 fn launch_contract_types_are_resolved_semantically() {
     let t = trybuild::TestCases::new();
+    t.compile_fail("tests/compile_fail/block_pipeline_shadowed_element.rs");
+    t.compile_fail("tests/compile_fail/block_pipeline_escape.rs");
+    t.compile_fail("tests/compile_fail/block_pipeline_escape_view.rs");
     t.compile_fail("tests/compile_fail/block_shared_shadowed_offset.rs");
     t.compile_fail("tests/compile_fail/block_shared_shadowed_element.rs");
 

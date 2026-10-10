@@ -34,6 +34,7 @@ pub(crate) struct CudaModuleKernel {
     pub(super) cluster_dim: Option<(u32, u32, u32)>,
     pub(super) cooperative: bool,
     pub(super) launch_contract: Option<CudaModuleLaunchContract>,
+    pub(super) pipeline_bytes: Option<syn::Expr>,
     pub(super) is_generic: bool,
 }
 

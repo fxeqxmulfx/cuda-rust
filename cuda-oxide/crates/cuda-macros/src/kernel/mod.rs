@@ -6,6 +6,7 @@
 //! `#[kernel]` argument parsing, validation, and expansion dispatch.
 
 pub(crate) mod codegen;
+pub(crate) mod pipeline;
 pub(crate) mod scope;
 pub(crate) mod shared;
 
@@ -195,6 +196,11 @@ pub(crate) fn kernel_entry(attr: TokenStream, item: TokenStream) -> TokenStream 
     let has_shared = input.sig.inputs.iter().any(|arg| {
         matches!(arg, FnArg::Typed(arg) if arg.attrs.iter().any(|attr| attr_path_ends_with(attr, "block_shared")))
     });
+    let has_shared = has_shared
+        || input
+            .attrs
+            .iter()
+            .any(|a| attr_path_ends_with(a, "block_pipeline"));
     if has_shared && (unchecked_indexing || !instantiate_types.is_empty()) {
         return syn::Error::new_spanned(
             &input.sig,

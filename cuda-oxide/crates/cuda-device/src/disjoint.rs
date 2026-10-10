@@ -115,6 +115,11 @@ impl SpaceLayout for WarpIndex {
     type Data = ();
 }
 
+impl<const N: usize> space_layout_sealed::Sealed for crate::thread::StripedWarp<N> {}
+impl<const N: usize> SpaceLayout for crate::thread::StripedWarp<N> {
+    type Data = ();
+}
+
 impl<const ROWS: usize, const COLS: usize> space_layout_sealed::Sealed
     for RuntimeRowMajorTiles<ROWS, COLS>
 {
@@ -259,6 +264,10 @@ impl<'a, T, const ROW_STRIDE: usize> __LaunchContractDisjointSlice<T, 2>
 }
 
 impl<'a, T> __LaunchContractDisjointSlice<T, 1> for DisjointSlice<'a, T, crate::thread::WarpIndex> {}
+impl<'a, T, const N: usize> __LaunchContractDisjointSlice<T, 1>
+    for DisjointSlice<'a, T, crate::thread::StripedWarp<N>>
+{
+}
 
 impl<'a, T> __LaunchContractDisjointSlice<T, 1>
     for DisjointSlice<'a, T, crate::thread::Runtime2DIndex>

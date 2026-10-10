@@ -72,6 +72,10 @@ pub enum Index2D<const ROW_STRIDE: usize> {}
 /// [`DisjointSlice::get_mut`]: crate::DisjointSlice::get_mut
 pub enum WarpIndex {}
 
+/// A warp owns N consecutive elements; lane L owns columns L, L+32, ... .
+/// The const capacity fixes the partition for the complete slice lifetime.
+pub enum StripedWarp<const N: usize> {}
+
 mod flat_index_sealed {
     pub trait Sealed {}
 }
@@ -99,6 +103,24 @@ impl<const ROW_STRIDE: usize> FlatIndexSpace for Index2D<ROW_STRIDE> {}
 
 impl flat_index_sealed::Sealed for WarpIndex {}
 impl FlatIndexSpace for WarpIndex {}
+impl<const N: usize> flat_index_sealed::Sealed for StripedWarp<N> {}
+impl<const N: usize> FlatIndexSpace for StripedWarp<N> {}
+
+#[inline(always)]
+fn striped_warp_offset<const N: usize>(
+    block: usize,
+    threads: usize,
+    thread: usize,
+    column: usize,
+) -> Option<usize> {
+    if threads == 0 || thread >= threads || column >= N || column % 32 != thread % 32 {
+        return None;
+    }
+    let warp = block
+        .checked_mul(threads.div_ceil(32))?
+        .checked_add(thread / 32)?;
+    warp.checked_mul(N)?.checked_add(column)
+}
 
 /// Index spaces whose `ThreadIndex` can be derived from the launch context alone.
 ///
@@ -657,6 +679,26 @@ pub mod __internal {
         unsafe { ThreadIndex::new(raw, valid, scope) }
     }
 
+    /// Mint a lane-owned column in a const-sized warp partition.
+    #[inline(always)]
+    pub fn striped_index<'kernel, const N: usize>(
+        scope: &'kernel LaunchContext<'kernel, impl LaunchDomain, impl Sized>,
+        column: usize,
+    ) -> Option<ThreadIndex<'kernel, super::StripedWarp<N>>> {
+        if !one_dimensional_launch(scope) {
+            return None;
+        }
+        let raw = super::striped_warp_offset::<N>(
+            super::blockIdx_x() as usize,
+            super::blockDim_x() as usize,
+            super::threadIdx_x() as usize,
+            column,
+        )?;
+        // SAFETY: each physical warp has its own N-element region, including
+        // partial warps. Distinct lanes own different column residues modulo 32.
+        Some(unsafe { ThreadIndex::new(raw, true, scope) })
+    }
+
     /// Real `warp_index` intrinsic the macros call in place of the public
     /// `super::warp_index` stub. `Some(warp)` for lane 0 of each warp in a 1D
     /// launch, `None` for every other lane.
@@ -1007,6 +1049,16 @@ pub fn warp_index<'kernel>() -> Option<ThreadIndex<'kernel, WarpIndex>> {
     unreachable!(
         "thread::warp_index called outside #[kernel] / #[device] — the macro rewrites real call sites; the public item is a stub"
     )
+}
+
+/// Select a lane-owned column in a warp's N-element region.
+/// Returns None for a column owned by another lane or beyond N. Partial
+/// block warps receive distinct regions. Calls are scoped by #[kernel]/#[device].
+#[inline(always)]
+pub fn striped_index<'kernel, const N: usize>(
+    _column: usize,
+) -> Option<ThreadIndex<'kernel, StripedWarp<N>>> {
+    unreachable!("striped_index called outside #[kernel] / #[device]")
 }
 
 /// Runtime-stride 2D indexing over the slice that supplies the stride.
@@ -1361,4 +1413,33 @@ const fn validate_unroll_factor(factor: u32) {
         factor == 0 || (factor >= 2 && factor <= 1024),
         "partial unroll factor must be in 2..=1024, or 0 for full unrolling"
     );
+}
+
+#[cfg(test)]
+mod striped_tests {
+    use super::striped_warp_offset;
+    #[test]
+    fn striped_ownership_is_unique_for_partial_warps_and_arbitrary_columns() {
+        for threads in [1, 17, 31, 32, 33, 48, 64, 127, 128] {
+            let mut seen = [false; 3 * 4 * 65];
+            for block in 0..3 {
+                for thread in 0..threads {
+                    for column in 0..100 {
+                        if let Some(offset) =
+                            striped_warp_offset::<65>(block, threads, thread, column)
+                        {
+                            assert_eq!(column % 32, thread % 32);
+                            assert!(!seen[offset], "threads={threads} offset={offset}");
+                            seen[offset] = true;
+                        } else {
+                            assert!(column >= 65 || column % 32 != thread % 32);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(striped_warp_offset::<0>(0, 32, 0, 0), None);
+        assert_eq!(striped_warp_offset::<64>(usize::MAX, 64, 0, 0), None);
+        assert_eq!(striped_warp_offset::<64>(0, 32, 32, 0), None);
+    }
 }

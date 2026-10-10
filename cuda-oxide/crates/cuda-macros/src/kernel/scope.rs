@@ -221,6 +221,11 @@ struct ScopedIntrinsic {
 
 const SCOPED_INTRINSICS: &[ScopedIntrinsic] = &[
     ScopedIntrinsic {
+        name: "striped_index",
+        preserve_turbofish: true,
+        forward_args: true,
+    },
+    ScopedIntrinsic {
         name: "index_1d",
         preserve_turbofish: false,
         forward_args: false,
@@ -360,7 +365,7 @@ pub(super) fn rewrite_thread_index_calls(
     Some(kernel_scope_spec(input, scope_ident))
 }
 
-fn rewrite_thread_index_calls_with_scope(
+pub(super) fn rewrite_thread_index_calls_with_scope(
     input: &mut ItemFn,
     scope_ident: &Ident,
     borrow_scope: bool,

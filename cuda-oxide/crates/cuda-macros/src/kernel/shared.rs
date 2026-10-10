@@ -43,7 +43,7 @@ impl Parse for TileArgs {
     }
 }
 
-fn validate_offset(expr: &Expr, names: &[String]) -> syn::Result<()> {
+pub(super) fn validate_offset(expr: &Expr, names: &[String]) -> syn::Result<()> {
     match expr {
         Expr::Lit(expr) if matches!(expr.lit, syn::Lit::Int(_)) => Ok(()),
         Expr::Path(path)

@@ -1,0 +1,11 @@
+[package]
+name = "block_pipeline"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+cuda-core = { path = "../../../../../cuda-core" }
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }

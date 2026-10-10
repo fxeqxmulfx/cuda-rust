@@ -585,8 +585,8 @@ impl<T: __TileElement> __ReadOnlyTile<T> {
     /// # Safety
     /// `pointer` must address `len` initialized, properly aligned elements in
     /// the current block's shared memory. All block threads must have finished
-    /// initialization and synchronized. No writes may occur for the remaining
-    /// kernel lifetime, and the guard must not escape the kernel invocation.
+    /// initialization and synchronized. No writes may occur while this guard or
+    /// its derived borrows are live. The guard must not escape the invocation.
     #[inline(always)]
     pub unsafe fn from_initialized(pointer: *const T, len: usize) -> Self {
         Self { pointer, len }
@@ -596,6 +596,65 @@ impl<T: __TileElement> __ReadOnlyTile<T> {
     pub fn as_slice(&self) -> &[T] {
         // SAFETY: the constructor establishes initialization, alignment,
         // visibility, and immutability. The borrow cannot outlive this guard.
-        unsafe { core::slice::from_raw_parts(self.pointer, self.len) }
+        if self.len == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(self.pointer, self.len) }
+        }
+    }
+}
+
+/// A bounded read-only matrix view valid for one pipeline callback.
+///
+/// Out-of-range rows, columns, offsets, and arithmetic overflow return `None`.
+/// The same view supports ordinary global-memory helpers and entry-staged tiles.
+pub struct BlockTile<'a, T> {
+    data: &'a [T],
+    offset: usize,
+    rows: usize,
+    columns: usize,
+    stride: usize,
+}
+impl<'a, T> BlockTile<'a, T> {
+    #[inline(always)]
+    pub fn new(data: &'a [T], offset: usize, rows: usize, columns: usize, stride: usize) -> Self {
+        Self {
+            data,
+            offset,
+            rows,
+            columns,
+            stride,
+        }
+    }
+    #[inline(always)]
+    pub fn get(&self, row: usize, column: usize) -> Option<&T> {
+        if row >= self.rows || column >= self.columns {
+            return None;
+        }
+        let index = row
+            .checked_mul(self.stride)?
+            .checked_add(self.offset)?
+            .checked_add(column)?;
+        self.data.get(index)
+    }
+}
+
+#[cfg(test)]
+mod block_tile_tests {
+    use super::BlockTile;
+    #[test]
+    fn rows_columns_tail_and_overflow_are_checked() {
+        let data = [1u32, 2, 3, 4, 5];
+        let view = BlockTile::new(&data, 1, 3, 2, 2);
+        assert_eq!(view.get(0, 0), Some(&2));
+        assert_eq!(view.get(1, 1), Some(&5));
+        assert_eq!(view.get(2, 0), None);
+        assert_eq!(view.get(0, 2), None);
+        assert_eq!(view.get(3, 0), None);
+        assert_eq!(BlockTile::new(&data, usize::MAX, 2, 2, 2).get(0, 1), None);
+        assert_eq!(
+            BlockTile::new(&data, 0, usize::MAX, 2, usize::MAX).get(2, 0),
+            None
+        );
     }
 }

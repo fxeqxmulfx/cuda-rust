@@ -238,23 +238,32 @@ pub(super) fn generate_cuda_module_launch_contract_impl(
         }
     });
     let alignment = contract.dynamic_shared_alignment;
-    let dynamic_shared = match contract.dynamic_shared {
-        DynamicSharedContract::Exact(bytes) => quote! {
+    let dynamic_shared = if let Some(bytes) = &kernel.pipeline_bytes {
+        quote! {
             ::cuda_core::DynamicSharedMemoryRequirement::Exact {
-                bytes: #bytes,
+                bytes: { let bytes: usize = #bytes; assert!(bytes <= u32::MAX as usize, "pipeline shared memory exceeds u32"); bytes as u32 },
                 min_alignment: #alignment,
             }
-        },
-        DynamicSharedContract::Range {
-            min_bytes,
-            max_bytes,
-        } => quote! {
-            ::cuda_core::DynamicSharedMemoryRequirement::Range {
-                min_bytes: #min_bytes,
-                max_bytes: #max_bytes,
-                min_alignment: #alignment,
-            }
-        },
+        }
+    } else {
+        match contract.dynamic_shared {
+            DynamicSharedContract::Exact(bytes) => quote! {
+                ::cuda_core::DynamicSharedMemoryRequirement::Exact {
+                    bytes: #bytes,
+                    min_alignment: #alignment,
+                }
+            },
+            DynamicSharedContract::Range {
+                min_bytes,
+                max_bytes,
+            } => quote! {
+                ::cuda_core::DynamicSharedMemoryRequirement::Range {
+                    min_bytes: #min_bytes,
+                    max_bytes: #max_bytes,
+                    min_alignment: #alignment,
+                }
+            },
+        }
     };
     let kernel_name = kernel.fn_name.to_string();
     let cluster = contract.cluster_tokens(kernel.cluster_dim);

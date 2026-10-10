@@ -529,11 +529,13 @@ pub(crate) fn transform_cuda_module_items(
     for item in items {
         match item {
             Item::Fn(item_fn) => {
-                if let Some(kernel) = cuda_module_kernel(item_fn, module_path, ancestor_cfg_attrs)?
+                let mut item_fn = item_fn.clone();
+                crate::kernel::pipeline::prepare_pipeline(&mut item_fn)?;
+                if let Some(kernel) = cuda_module_kernel(&item_fn, module_path, ancestor_cfg_attrs)?
                 {
                     direct_kernels.push(kernel);
                 }
-                transformed_items.push(item.clone());
+                transformed_items.push(Item::Fn(item_fn));
             }
             Item::Mod(item_mod) => {
                 let Some((_brace, nested_items)) = &item_mod.content else {
@@ -685,6 +687,8 @@ fn cuda_module_kernel(
     if let Some(err) = impl_trait_parameter_error(item_fn, "kernel") {
         return Err(err);
     }
+    let pipeline_bytes = crate::kernel::pipeline::prepare_pipeline(&mut item_fn.clone())?
+        .map(|pipeline| pipeline.bytes());
     let cluster_dim = cuda_module_cluster_dim(&item_fn.attrs)?;
     let cooperative = cuda_module_cooperative(&item_fn.attrs)?;
     let params = cuda_module_params(item_fn)?;
@@ -745,6 +749,7 @@ fn cuda_module_kernel(
         cluster_dim,
         cooperative,
         launch_contract,
+        pipeline_bytes,
         is_generic,
     }))
 }

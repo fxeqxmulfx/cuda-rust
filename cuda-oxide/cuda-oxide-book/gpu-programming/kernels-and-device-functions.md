@@ -516,3 +516,69 @@ The [Error Handling and Debugging](error-handling-and-debugging.md) chapter
 covers `gpu_printf!`, `gpu_assert!`, and `cargo oxide debug` for diagnosing
 kernel failures.
 :::
+
+## Safe reusable block tiles
+
+On Ampere and newer GPUs, `#[block_pipeline]` stages immutable slice parameters
+annotated with `#[tile_source]` into two reusable dynamic shared-memory slots.
+This scheduling annotation is consumed by `#[kernel]`; it is not a separate
+attribute macro. It currently requires a generic kernel and an exact 1D block
+containing complete warps.
+
+```rust,ignore
+use cuda_device::shared::BlockTile;
+
+#[kernel]
+#[launch_contract(domain = 1, block = (128, 1, 1))]
+#[block_pipeline(rows = 4, iterations = passes)]
+pub fn tiled_sum<const C: usize>(
+    passes: usize,
+    #[tile_source(columns = C, stride = C, offset = block * passes * 4 * C)]
+    input: &[f32],
+    mut output: DisjointSlice<f32>,
+) {
+    let init = || 0.0;
+    let step = |sum: &mut f32, _iteration: usize, tile: BlockTile<'_, f32>| {
+        let lane = thread::threadIdx_x() as usize;
+        *sum += tile.get(lane / 32, lane % 32).copied().unwrap_or(0.0);
+    };
+    let mut finish = |sum: f32| {
+        if let Some(value) = output.get_mut(thread::index_1d()) {
+            *value = sum;
+        }
+    };
+}
+```
+
+The body contains exactly the `init`, `step`, and `finish` closure bindings.
+The generated entry owns initialization, async-copy commit/wait, publication,
+and the barrier after every reader finishes. Returning from a callback does
+not skip the scheduler. Tile borrows cannot escape a callback into persistent
+state. The ordinary device helper reads global-memory views and contains no
+collective schedule, so calling it under divergent control flow does not
+reuse shared storage.
+
+`rows` is a literal in 1..=64. Columns and row strides use integer arithmetic
+on `usize` const parameters; iterations and offsets may also use `usize`
+kernel scalars and the block index `block`. Expressions cannot call user code
+or read thread-varying memory. Sources have the same primitive numeric element
+type. Their readable bounds and arithmetic overflow are checked; unavailable
+elements are zero-filled. `BlockTile::get` checks row, column, and backing-slice
+bounds. Each iteration advances the source by `rows * stride` elements.
+
+The typed host launcher derives an exact shared-memory requirement of
+`2 * rows * sum(columns) * size_of::<element>()`, 16-byte alignment, and minimum
+compute capability 8.0. Pass that byte count to `LaunchConfig1D::new`; preparation
+rejects other allocations and checks the device's resource limits. A user
+`dynamic_shared` envelope cannot weaken the derived exact requirement.
+Numbered CTA barrier 15 is reserved for the generated schedule, isolating it
+from safe `thread::sync_threads()` calls on barrier 0. Unsafe code inside a
+callback must not interfere with the reserved barrier or shared storage.
+
+For warp-distributed outputs, use
+`DisjointSlice<T, thread::StripedWarp<N>>`. Physical warp `w` owns its `N`
+consecutive elements, and lane `l` owns columns `l`, `l + 32`, and so on.
+`thread::striped_index::<N>(column)` returns a scoped write witness only for a
+column owned by the current lane. `N` is fixed for the slice lifetime; changing
+it cannot create overlapping ownership. Physical warp numbering accounts for
+partial warps in arbitrary 1D blocks.

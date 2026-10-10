@@ -1,0 +1,32 @@
+error[E0277]: the trait bound `*const u32: cuda_device::shared::__TileElement` is not satisfied
+ --> tests/compile_fail/block_pipeline_shadowed_element.rs:7:1
+  |
+7 | #[kernel]
+  | ^^^^^^^^^
+  | |
+  | the trait `cuda_device::shared::__TileElement` is not implemented for `*const u32`
+  | required by a bound introduced by this call
+  |
+help: the trait `cuda_device::shared::__TileElement` is implemented for `u32`
+ --> $WORKSPACE/crates/cuda-device/src/shared.rs
+  |
+  | impl __TileElement for u32 {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `cuda_device::shared::__ReadOnlyTile::<T>::from_initialized`
+ --> $WORKSPACE/crates/cuda-device/src/shared.rs
+  |
+  | impl<T: __TileElement> __ReadOnlyTile<T> {
+  |         ^^^^^^^^^^^^^ required by this bound in `__ReadOnlyTile::<T>::from_initialized`
+...
+  |     pub unsafe fn from_initialized(pointer: *const T, len: usize) -> Self {
+  = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `as_slice` exists for struct `cuda_device::shared::__ReadOnlyTile<*const u32>`, but its trait bounds were not satisfied
+ --> tests/compile_fail/block_pipeline_shadowed_element.rs:7:1
+  |
+7 | #[kernel]
+  | ^^^^^^^^^ method cannot be called on `cuda_device::shared::__ReadOnlyTile<*const u32>` due to unsatisfied trait bounds
+  |
+  = note: the following trait bounds were not satisfied:
+          `*const u32: cuda_device::shared::__TileElement`
+  = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)

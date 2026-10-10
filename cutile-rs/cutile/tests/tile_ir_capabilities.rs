@@ -95,6 +95,14 @@ mod kernels {
     }
 
     #[cutile::entry()]
+    fn fp8_round_trip(output: &mut Tensor<f32, { [8] }>) {
+        let value: Tile<f32, { [8] }> = constant(1.0, shape![8]);
+        let narrow: Tile<f8e4m3fn, { [8] }> = convert_tile(value);
+        let result: Tile<f32, { [8] }> = convert_tile(narrow);
+        output.store(result);
+    }
+
+    #[cutile::entry()]
     fn invalid_exp_rounding(output: &mut Tensor<f32, { [4] }>) {
         let value: Tile<f32, { [4] }> = constant(0.0, shape![4]);
         let result = unsafe { exp_with_rounding(value, rounding::NearestAway) };
@@ -354,6 +362,36 @@ fn scale_format_accepts_sm107_with_13_4() {
             .unwrap()
             .bytecode()
             .unwrap();
+    });
+}
+
+#[test]
+fn fp8_on_sm_86_requires_the_emulation_option() {
+    use cutile_compiler::compiler::utils::CompileOptions;
+    common::with_test_stack(|| {
+        let compile = |target, options| {
+            KernelCompiler::new(kernels::__module_ast_self, "kernels", "fp8_round_trip")
+                .strides(&[("output", &[1])])
+                .target(target)
+                .bytecode_version(BytecodeVersion::V13_4)
+                .options(options)
+                .compile()
+        };
+        let error = compile("sm_86", CompileOptions::new())
+            .err()
+            .expect("FP8 on sm_86 must be refused without the option");
+        let cutile_compiler::error::JITError::Located(message, _) = error else {
+            panic!("capability refusal must retain the call-site span");
+        };
+        assert_eq!(
+            message,
+            "cuda_tile.ftof using F8E4M3FN requires sm_90 or newer; selected Tile IR 13.4, target sm_86"
+        );
+        let emulated = compile("sm_86", CompileOptions::new().fp8_emulation(true)).unwrap();
+        assert!(!emulated.ir_text().contains("f8e4m3fn"));
+        emulated.bytecode().unwrap();
+        let native = compile("sm_90", CompileOptions::new().fp8_emulation(true)).unwrap();
+        assert!(native.ir_text().contains("f8e4m3fn"));
     });
 }
 

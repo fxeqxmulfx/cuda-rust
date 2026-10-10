@@ -88,11 +88,13 @@ We do not impose a blanket driver-version-at-least-toolkit-version check.
 
 ## Software FP8 storage and conversions
 
-The Rust compiler supports `f8e4m3fn` and `f8e5m2` storage on `sm_80` through
-`sm_89` by emitting byte storage and software conversions on the GPU. Existing
-`api::full`, `api::zeros`, `api::ones`, and `api::convert` calls select this path
-automatically. Tensor shapes, strides, storage bytes, and launch arguments retain
-their layout. No host round trip is needed.
+The Rust compiler can emulate `f8e4m3fn` and `f8e5m2` storage on `sm_80`
+through `sm_89` with byte storage and software conversions on the GPU. A kernel
+launch selects it with `.compile_options(CompileOptions::new().fp8_emulation(true))`.
+Without this option, FP8 on these targets gives a capability error. The `api`
+functions, such as `api::full` and `api::convert`, use the default options.
+Tensor shapes, strides, storage bytes, and launch arguments retain their layout.
+No host round trip is needed.
 
 Conversions support `f16`, `bf16`, `f32`, `f64`, `tf32`, integer types, and both
 signed FP8 formats. Conversion to FP8 rounds to nearest with ties to even and

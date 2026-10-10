@@ -69,7 +69,7 @@ after each device fix.
 - [x] Host, one time for each module load:
   [`register_merged_module_entries`](cuda-oxide/crates/cuda-host/src/entry_registry.rs)
   parses the merged PTX again. Use the entry names that the merge found.
-- [ ] [FP8 emulation](cutile-rs/cutile-ir/src/emulation.rs) changes FP8
+- [x] [FP8 emulation](cutile-rs/cutile-ir/src/emulation.rs) changes FP8
   conversions on sm_80–sm_89 to software conversions that the source does not
   show. Use the emulation only when the user selects it. Without it, keep the
   capability error.

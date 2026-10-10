@@ -134,6 +134,11 @@ pub struct CompileOptions {
     /// Instrument memory accesses for Compute Sanitizer's memcheck tool
     /// (`tileiras --sanitize=memcheck`).
     pub sanitize_memcheck: bool,
+    /// Emulate `f8e4m3fn` and `f8e5m2` storage and conversions on `sm_80`
+    /// through `sm_89`. The conversions use more instructions than native FP8
+    /// conversions. Without this option, FP8 on these targets gives a
+    /// capability error.
+    pub fp8_emulation: bool,
 }
 
 impl Default for CompileOptions {
@@ -147,6 +152,7 @@ impl Default for CompileOptions {
             device_debug: env!("CUTILE_BUILD_DEBUG_INFO") == "full",
             lineinfo: env!("CUTILE_BUILD_DEBUG_INFO") == "line",
             sanitize_memcheck: false,
+            fp8_emulation: false,
         }
     }
 }
@@ -204,6 +210,11 @@ impl CompileOptions {
 
     pub fn sanitize_memcheck(mut self, sanitize_memcheck: bool) -> Self {
         self.sanitize_memcheck = sanitize_memcheck;
+        self
+    }
+
+    pub fn fp8_emulation(mut self, fp8_emulation: bool) -> Self {
+        self.fp8_emulation = fp8_emulation;
         self
     }
 }

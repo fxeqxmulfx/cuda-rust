@@ -265,6 +265,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    println!("275 pipeline cases, 9 partial-warp cases and 8 view cases passed");
+    println!("SUCCESS: 275 pipeline cases, 9 partial-warp cases and 8 view cases passed");
     Ok(())
 }

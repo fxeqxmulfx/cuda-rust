@@ -2463,6 +2463,20 @@ pub fn translate_body(
         blocks_processed.insert(idx);
     }
 
+    // If only dropped panic blocks use a local, no operation reads or writes
+    // its slot. An example is the `core::fmt` arguments of a panic message.
+    // mem2reg removes such a slot, but full debug does not run mem2reg, and
+    // the type of the slot can have no device lowering. Thus remove it here.
+    for local in 0..num_locals {
+        if let Some(alloca) = value_map
+            .get_slot(local)
+            .and_then(|slot| slot.defining_op())
+            && !alloca.deref(ctx).has_use()
+        {
+            Operation::erase(alloca, ctx);
+        }
+    }
+
     // Unwind cleanup blocks are unreachable on GPU but pliron still requires
     // every block to have a terminator, so we stitch `mir.unreachable` onto
     // the ones we skipped above. Later passes are free to drop them as dead
@@ -3417,5 +3431,147 @@ pub fn closure_host(a: u32, b: u64) -> u32 {
             }
             other => panic!("capture_1 must be a basic u64, got {other:?}"),
         }
+    }
+
+    /// The message of a panic is built only in the block that ends in the
+    /// panic call, and the translator drops that block. Full debug does not
+    /// run mem2reg, thus a slot of a message local must not stay: the
+    /// `core::fmt::rt::ArgumentType` in it has no device lowering.
+    #[test]
+    fn full_debug_lowers_a_function_with_a_formatted_panic() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cuda_oxide_panic_message_slots_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("panic_message_slots_fixture.rs");
+        std::fs::write(
+            &fixture,
+            r#"
+#[inline(never)]
+pub fn probe(value: u32, limit: u32) -> u32 {
+    if value > limit {
+        panic!("{value} is above {limit}");
+    }
+    value
+}
+"#,
+        )
+        .unwrap();
+
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let sysroot_output = std::process::Command::new(rustc)
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("query rustc sysroot");
+        assert!(sysroot_output.status.success(), "rustc --print sysroot");
+        let sysroot = String::from_utf8(sysroot_output.stdout)
+            .expect("sysroot path is UTF-8")
+            .trim()
+            .to_string();
+
+        // The MIR flags of a full-debug device build.
+        let args = vec![
+            "rustc".to_string(),
+            "--edition=2024".to_string(),
+            "--crate-type=rlib".to_string(),
+            "--crate-name=panic_message_slots_fixture".to_string(),
+            "--emit=metadata".to_string(),
+            "-Cdebuginfo=2".to_string(),
+            "-Copt-level=3".to_string(),
+            "-Zmir-enable-passes=-ScalarReplacementOfAggregates,-SingleUseConsts".to_string(),
+            format!("--out-dir={}", root.display()),
+            format!("--sysroot={sysroot}"),
+            fixture.display().to_string(),
+        ];
+
+        let (debug_variables, lowering) = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                rustc_public::run!(&args, || {
+                    let item = rustc_public::all_local_items()
+                        .into_iter()
+                        .find(|item| item.name().ends_with("::probe"))
+                        .expect("probe item");
+                    let instance = mono::Instance::try_from(item).expect("probe instance");
+                    let body = instance.body().expect("probe body");
+                    let successors: Vec<_> = body
+                        .blocks
+                        .iter()
+                        .map(|block| block.terminator.successors())
+                        .collect();
+
+                    let mut ctx = Context::new();
+                    crate::translator::register_dialects(&mut ctx);
+                    let mut legaliser = Legaliser::default();
+                    let func = translate_body(
+                        &mut ctx,
+                        &body,
+                        &instance,
+                        body.blocks.len(),
+                        &successors,
+                        false,
+                        false,
+                        Some("probe"),
+                        &mut legaliser,
+                        DebugKind::Full,
+                        None,
+                        None,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "translation fails: {}",
+                            pliron::printable::Printable::disp(&error, &ctx)
+                        )
+                    });
+
+                    let mut debug_variables = Vec::new();
+                    let region = func.deref(&ctx).get_region(0);
+                    let blocks: Vec<_> = region.deref(&ctx).iter(&ctx).collect();
+                    for block in blocks {
+                        for op in block.deref(&ctx).iter(&ctx) {
+                            if Operation::get_op::<dialect_mir::ops::MirAllocaOp>(op, &ctx)
+                                .is_some()
+                                && let Some(variable) =
+                                    llvm_export::ops::debug_local_variable(&ctx, op)
+                            {
+                                debug_variables.push(variable.name);
+                            }
+                        }
+                    }
+
+                    let module = ModuleOp::new(&mut ctx, "panic_message_slots".try_into().unwrap());
+                    let module_op = module.get_operation();
+                    let module_region = module_op.deref(&ctx).get_region(0);
+                    let module_block = module_region
+                        .deref(&ctx)
+                        .iter(&ctx)
+                        .next()
+                        .expect("module block");
+                    func.insert_at_back(module_block, &ctx);
+                    mir_lower::register(&mut ctx);
+                    let lowering = mir_lower::lower_mir_to_llvm(&mut ctx, module_op)
+                        .map_err(|error| error.to_string());
+                    std::ops::ControlFlow::<(), _>::Continue((debug_variables, lowering))
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .expect("in-process fixture compilation succeeds");
+
+        std::fs::remove_dir_all(&root).ok();
+
+        lowering.expect("full-debug lowering succeeds");
+        assert!(
+            debug_variables.iter().any(|name| name == "value")
+                && debug_variables.iter().any(|name| name == "limit"),
+            "the arguments keep their debug slots: {debug_variables:?}"
+        );
     }
 }

@@ -28,7 +28,7 @@ Make one commit with a test for each fix.
 - [ ] In full debug, `packed_aggregate_abi` does not compile: "storing a packed
   aggregate containing a shared-memory pointer by value is target-mode
   dependent and is not yet supported". `main` has the same failure.
-- [ ] In full debug, `warp_sums` and `partial_warp_reduce` do not compile. The
+- [x] In full debug, `warp_sums` and `partial_warp_reduce` do not compile. The
   enum slot map of `core::fmt::rt::ArgumentType` refuses a pointer at byte 8
   that other storage overlaps. `main` has the same failure.
 

@@ -294,3 +294,69 @@ jobs:
             ${{ runner.temp }}/cross-crate-*-build.log
           if-no-files-found: ignore
           retention-days: 7
+
+  examples-full-debug:
+    name: full-debug census of all examples (GPU-less)
+    runs-on: ubuntu-latest
+    # Leave job-level headroom around the 50-minute census, plus toolkit/LLVM
+    # setup.
+    timeout-minutes: 65
+    env:
+      # The runner has no installed `cargo-oxide`. This alias runs the
+      # `cargo-oxide` of the checkout.
+      CARGO_ALIAS_OXIDE: run --package cargo-oxide --
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same toolkit as the job above. The configured cubin route of
+      # `interop_cubin_identity` needs libNVVM and nvJitLink.
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        id: cuda-toolkit
+        with:
+          cuda: "13.4.2"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcurand-dev", "libnvjitlink-dev"]'
+
+      - name: Install LLVM 23 (llc/opt for the NVPTX backend)
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/keyrings/apt-llvm-org.asc >/dev/null
+          echo "deb [signed-by=/etc/apt/keyrings/apt-llvm-org.asc] https://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-23 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-23.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-23
+          llc-23 --version | head -2
+          opt-23 --version | head -2
+
+      - name: Build every example with full debug (smoketest --full-debug)
+        # A step timeout fails the step, so the log upload below still runs.
+        timeout-minutes: 50
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+          CUDA_OXIDE_LLC: /usr/bin/llc-23
+          # Same disk limits as the compile-only step above.
+          CARGO_TARGET_DIR: ${{ runner.temp }}/examples-shared-target
+          SMOKETEST_LOG_DIR: ${{ runner.temp }}/smoketest-logs
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set -euo pipefail
+          sysroot="$(rustc --print sysroot)"
+          export LIBRARY_PATH="${sysroot}/lib:${LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="${sysroot}/lib:${LD_LIBRARY_PATH:-}"
+
+          cuda-oxide/scripts/smoketest.sh --full-debug --no-color
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smoketest-full-debug-logs
+          path: ${{ runner.temp }}/smoketest-logs/
+          if-no-files-found: ignore
+          retention-days: 7

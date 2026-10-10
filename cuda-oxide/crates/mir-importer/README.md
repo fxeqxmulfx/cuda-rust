@@ -28,7 +28,9 @@ translate → verify → mem2reg → annotated unroll → lower/export → optim
 ```
 
 Full variable-debug builds skip `mem2reg` and annotated unrolling so source
-variables remain in stable memory locations for cuda-gdb.
+variables remain in stable memory locations for cuda-gdb. A function that
+issues a WGMMA MMA still gets `mem2reg`, because the WGMMA accumulator fusion
+reads SSA values.
 
 1. **Translate** — Convert Stable MIR into `dialect-mir` using the alloca +
    load/store model (one `mir.alloca` per non-ZST local).

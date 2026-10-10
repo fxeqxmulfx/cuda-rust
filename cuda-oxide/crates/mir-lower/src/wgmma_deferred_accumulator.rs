@@ -58,9 +58,9 @@
 use dialect_mir::attributes::MirCastKindAttr;
 use dialect_mir::{
     ops::{
-        MirAddOp, MirArrayElementAddrOp, MirCastOp, MirCondBranchOp, MirConstantOp, MirFuncOp,
-        MirGeOp, MirGotoOp, MirGtOp, MirLeOp, MirLoadOp, MirLtOp, MirNotOp, MirStorageDeadOp,
-        MirStorageLiveOp, MirStoreOp, MirSubOp,
+        MirAddOp, MirArrayElementAddrOp, MirCastOp, MirCondBranchOp, MirConstantOp,
+        MirDbgValueListOp, MirDbgValueOp, MirFuncOp, MirGeOp, MirGotoOp, MirGtOp, MirLeOp,
+        MirLoadOp, MirLtOp, MirNotOp, MirStorageDeadOp, MirStorageLiveOp, MirStoreOp, MirSubOp,
     },
     types::{MirArrayType, MirPtrType, address_space},
 };
@@ -92,7 +92,8 @@ use pliron::{
     location::Located,
     op::{Op, op_cast},
     operation::Operation,
-    opts::simplify_cfg::remove_blocks_inside_op,
+    opts::{mem2reg::mem2reg, simplify_cfg::remove_blocks_inside_op},
+    pass::AnalysisManager,
     region::Region,
     result::Result,
     r#type::{TypeHandle, Typed},
@@ -288,6 +289,7 @@ fn counted_loop_operation_is_supported(ctx: &Context, operation: Ptr<Operation>)
         || Operation::get_op::<ConstantOp>(operation, ctx).is_some()
         || Operation::get_op::<MirStorageLiveOp>(operation, ctx).is_some()
         || Operation::get_op::<MirStorageDeadOp>(operation, ctx).is_some()
+        || is_debug_record(ctx, operation)
         || Operation::get_op::<MirAddOp>(operation, ctx).is_some()
         || Operation::get_op::<MirSubOp>(operation, ctx).is_some()
         || Operation::get_op::<MirNotOp>(operation, ctx).is_some()
@@ -1581,7 +1583,16 @@ fn is_ignorable(ctx: &Context, op: Ptr<Operation>) -> bool {
         || Operation::get_op::<MirStorageLiveOp>(op, ctx).is_some()
         || Operation::get_op::<MirStorageDeadOp>(op, ctx).is_some()
         || Operation::get_op::<MirGotoOp>(op, ctx).is_some()
+        || is_debug_record(ctx, op)
         || is_representation_only_ptr_retype(ctx, op)
+}
+
+/// A debug-only value record, which produces no instruction.
+///
+/// mem2reg emits these for the named locals of a full-debug build.
+fn is_debug_record(ctx: &Context, op: Ptr<Operation>) -> bool {
+    Operation::get_op::<MirDbgValueOp>(op, ctx).is_some()
+        || Operation::get_op::<MirDbgValueListOp>(op, ctx).is_some()
 }
 
 /// A `mir.cast <PtrToPtr>` between thin MIR pointers with the same pointee and
@@ -2258,6 +2269,27 @@ fn region_is_fully_reachable(ctx: &Context, region: Ptr<Region>) -> bool {
     }
 
     reachable.len() == all_blocks.len()
+}
+
+/// Promote the stack slots of each function that issues a pointer-form WGMMA
+/// MMA operation.
+///
+/// Full debug keeps locals in memory, but the recognizers in this module read
+/// SSA values. mem2reg keeps the named locals of these functions visible
+/// through `mir.dbg_value`.
+pub fn promote_wgmma_functions(ctx: &mut Context, module_op: Ptr<Operation>) -> Result<()> {
+    for function in collect_functions(ctx, module_op) {
+        let issues_mma = collect_blocks(ctx, function).into_iter().any(|block| {
+            block
+                .deref(ctx)
+                .iter(ctx)
+                .any(|operation| wgmma_mma_kind(ctx, operation).is_some())
+        });
+        if issues_mma {
+            mem2reg(function, ctx, &mut AnalysisManager::default())?;
+        }
+    }
+    Ok(())
 }
 
 /// Adapt every supported pointer-form WGMMA sequence in `module_op`.

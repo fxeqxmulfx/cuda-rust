@@ -416,7 +416,8 @@ is a `-G`-style build: it **skips** Pliron `mem2reg` (so the stack slots
 survive), **skips** LLVM `opt -O2`, and runs `llc` at `-O0`. Promoting a local
 to an SSA value would shrink its inspectable range to its register's liveness,
 which is exactly how an optimized build ends up showing in-scope locals as
-`<optimized out>`.
+`<optimized out>`. A function that issues a WGMMA MMA is the exception: the
+WGMMA accumulator fusion reads SSA values, thus `mem2reg` runs on that function.
 
 The aggregate locals (structs, tuples, arrays) get a `DICompositeType` whose
 members carry rustc's real layout offsets, so `info locals` prints their fields:

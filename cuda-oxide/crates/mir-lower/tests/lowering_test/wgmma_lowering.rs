@@ -1120,6 +1120,137 @@ fn test_pointer_form_wgmma_sequence_uses_value_adapter_before_lowering() -> Resu
 }
 
 #[test]
+fn test_full_debug_wgmma_slots_promote_before_value_adapter() -> Result<(), anyhow::Error> {
+    use dialect_mir::types::{MirArrayType, MirPtrType};
+    use pliron::basic_block::BasicBlock;
+    use pliron::builtin::types::{FP32Type, IntegerType, Signedness};
+    use pliron::context::Ptr;
+    use pliron::r#type::TypeHandle;
+    use pliron::value::Value;
+
+    fn append_slot(ctx: &mut Context, block: Ptr<BasicBlock>, pointee: TypeHandle) -> Value {
+        let pointer: TypeHandle = MirPtrType::get_generic(ctx, pointee, true).into();
+        let slot = Operation::new(
+            ctx,
+            mir::MirAllocaOp::get_concrete_op_info(),
+            vec![pointer],
+            vec![],
+            vec![],
+            0,
+        );
+        slot.insert_at_back(block, ctx);
+        slot.deref(ctx).get_result(0)
+    }
+
+    fn append_store(ctx: &mut Context, block: Ptr<BasicBlock>, slot: Value, value: Value) {
+        Operation::new(
+            ctx,
+            mir::MirStoreOp::get_concrete_op_info(),
+            vec![],
+            vec![slot, value],
+            vec![],
+            0,
+        )
+        .insert_at_back(block, ctx);
+    }
+
+    fn append_load(
+        ctx: &mut Context,
+        block: Ptr<BasicBlock>,
+        slot: Value,
+        ty: TypeHandle,
+    ) -> Value {
+        let load = Operation::new(
+            ctx,
+            mir::MirLoadOp::get_concrete_op_info(),
+            vec![ty],
+            vec![slot],
+            vec![],
+            0,
+        );
+        load.insert_at_back(block, ctx);
+        load.deref(ctx).get_result(0)
+    }
+
+    let mut ctx = make_test_ctx();
+    let f32_ty = FP32Type::get(&ctx);
+    let row_ty = MirArrayType::get(&mut ctx, f32_ty.into(), 8);
+    let accumulator_ty = MirArrayType::get(&mut ctx, row_ty.into(), 4);
+    let accumulator_ptr_ty: TypeHandle =
+        MirPtrType::get_generic(&mut ctx, accumulator_ty.into(), true).into();
+    let u64_ty = IntegerType::get(&ctx, 64, Signedness::Unsigned);
+
+    let (module_ptr, entry) = build_test_kernel(&mut ctx, vec![accumulator_ptr_ty]);
+    let accumulator = entry.deref(&ctx).get_argument(0);
+
+    // Full debug keeps the `&mut acc` temporary and a named descriptor in
+    // stack slots, thus the region has memory operations.
+    let pointer_slot = append_slot(&mut ctx, entry, accumulator_ptr_ty);
+    let descriptor_slot = append_slot(&mut ctx, entry, u64_ty.into());
+    llvm::set_debug_local_variable(
+        &mut ctx,
+        descriptor_slot.defining_op().expect("alloca result"),
+        llvm::DebugLocalVariableInfo {
+            name: "desc".to_string(),
+            argument_index: None,
+            ty: llvm::DebugLocalTypeKind::Basic {
+                name: "u64".to_string(),
+                size_bits: 64,
+                encoding: "DW_ATE_unsigned",
+            },
+        },
+    );
+    let descriptor = append_mir_unsigned_constant(&mut ctx, entry, u64_ty, 0);
+    append_store(&mut ctx, entry, descriptor_slot, descriptor);
+    nvvm::WgmmaFenceSyncAlignedOp::build(&mut ctx).insert_at_back(entry, &ctx);
+    append_store(&mut ctx, entry, pointer_slot, accumulator);
+    let reborrow = append_load(&mut ctx, entry, pointer_slot, accumulator_ptr_ty);
+    let desc = append_load(&mut ctx, entry, descriptor_slot, u64_ty.into());
+    append_pointer_wgmma_mma(&mut ctx, entry, reborrow, desc, desc);
+    nvvm::WgmmaCommitGroupSyncAlignedOp::build(&mut ctx).insert_at_back(entry, &ctx);
+    append_wgmma_wait_group_constant(&mut ctx, entry, 0);
+    append_return(&mut ctx, entry);
+
+    mir_lower::promote_wgmma_functions(&mut ctx, module_ptr)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    mir_lower::lower_mir_to_llvm(&mut ctx, module_ptr)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+    let body = lowered_kernel_body(&ctx, module_ptr);
+    assert!(
+        body.iter()
+            .all(|operation| Operation::get_op::<llvm::AllocaOp>(*operation, &ctx).is_none()),
+        "both slots must be promoted"
+    );
+    let templates = body
+        .iter()
+        .filter_map(|operation| Operation::get_op::<llvm::InlineAsmOp>(*operation, &ctx))
+        .filter_map(|asm| {
+            asm.get_attr_llvm_inline_asm_template(&ctx)
+                .map(|value| String::from((*value).clone()))
+        })
+        .filter(|template| template.contains("wgmma.mma_async"))
+        .collect::<Vec<_>>();
+    assert_eq!(templates.len(), 1);
+    assert!(
+        !templates[0].contains("ld.f32") && !templates[0].contains("st.f32"),
+        "the region must use the value adapter: {}",
+        templates[0]
+    );
+    assert_eq!(
+        body.iter()
+            .filter(
+                |operation| Operation::get_op::<llvm::DebugValueOp>(**operation, &ctx).is_some()
+            )
+            .count(),
+        2,
+        "the named descriptor must stay visible at its store and its load"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_pointer_form_m64n128_bf16_linear_full_drain_uses_sixty_four_value_adapter()
 -> Result<(), anyhow::Error> {
     let mut ctx = make_test_ctx();

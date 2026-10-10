@@ -24,7 +24,7 @@ Make one commit with a test for each fix.
 - [x] `scripts/smoketest.sh --full-debug` fails for `iket_trace`. IKET needs
   the MIR preparation that full debug skips, thus the backend refuses the
   kernel. `main` has the same failure.
-- [ ] `scripts/smoketest.sh --full-debug` fails for `wgmma_mma_bf16`. The
+- [x] `scripts/smoketest.sh --full-debug` fails for `wgmma_mma_bf16`. The
   WGMMA accumulator fusion needs the MIR preparation that full debug skips,
   thus the backend refuses the kernel. The census does not expect this
   refusal. `main` has the same failure.

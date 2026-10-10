@@ -42,7 +42,8 @@ Step 8:  Compile with llc, or with libNVVM and nvJitLink
 ```
 
 Full variable-debug builds skip steps 3 and 4 so source variables remain in
-stable memory locations for cuda-gdb.
+stable memory locations for cuda-gdb. A function that issues a WGMMA MMA still
+gets step 3, because the WGMMA accumulator fusion reads SSA values.
 
 Each `CollectedFunction` carries everything the pipeline needs to know about a
 device function:

@@ -16,7 +16,9 @@
 //! ```
 //!
 //! Builds with variable debug information skip `mem2reg` and loop unrolling so
-//! source variables remain in stable stack slots.
+//! source variables remain in stable stack slots. A function that issues a
+//! WGMMA MMA still gets `mem2reg`, because the WGMMA accumulator fusion reads
+//! SSA values.
 //!
 //! # GPU Target Selection
 //!

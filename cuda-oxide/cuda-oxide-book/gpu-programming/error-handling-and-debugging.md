@@ -301,12 +301,13 @@ read.
 ```text
 rustc MIR                         cuda-oxide / LLVM
 ------------------------------    ------------------
-ScalarReplacement...: off    ->   mem2reg: off
+ScalarReplacement...: off    ->   mem2reg: off**
 SingleUseConsts: off               loop unrolling: off
 ReferencePropagation: on           opt -O2: off
 general inlining: on*              llc: -O0
 
 * only DisjointSlice::get_mut is outlined
+** on in a function that issues a WGMMA MMA
 ```
 
 `ReferencePropagation` may replace a pointer assignment with an `AssignRef`
@@ -355,7 +356,8 @@ materialized.
 
 > The promotion-aware `mir.dbg_value` salvage that Pliron `mem2reg` performs is
 > the building block for a future *optimized* debug tier (locals through
-> `opt -O2`, best-effort). It is not what `full` uses today.
+> `opt -O2`, best-effort). `full` uses it only in a function that issues a
+> WGMMA MMA.
 
 ### What works today
 

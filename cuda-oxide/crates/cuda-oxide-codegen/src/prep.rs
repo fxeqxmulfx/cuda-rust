@@ -15,6 +15,7 @@ use pliron::printable::Printable;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MirPreparation<'a> {
     /// Promote stack slots to SSA and run annotation-driven loop unrolling.
+    /// When false, only the functions that issue a WGMMA MMA are promoted.
     pub promote_and_unroll: bool,
     /// Print preparation-pass progress notes to stderr. Threaded from the
     /// pipeline's `BackendOptions`; the scalarization passes read this flag
@@ -45,7 +46,16 @@ pub fn prepare_mir_module(
                 "optional MIR passes are unavailable with full variable debug info".to_string(),
             ));
         }
-        return Ok(());
+        // Full debug keeps locals in memory, but the WGMMA accumulator fusion
+        // reads SSA values.
+        mir_lower::promote_wgmma_functions(ctx, module).map_err(|error| {
+            PipelineError::Verification {
+                name: "WGMMA mem2reg".to_string(),
+                message: error.disp(ctx).to_string(),
+                operation: None,
+            }
+        })?;
+        return verify_operation(ctx, module, "module post-WGMMA-mem2reg");
     }
 
     // Validate every requested pass before any transformation runs. This keeps

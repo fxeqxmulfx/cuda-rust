@@ -133,6 +133,8 @@ pub mod scalarize_block_args;
 pub mod type_conversion_interface;
 mod wgmma_deferred_accumulator;
 
+pub use wgmma_deferred_accumulator::promote_wgmma_functions;
+
 use rustc_hash::FxHashMap;
 
 use pliron::{

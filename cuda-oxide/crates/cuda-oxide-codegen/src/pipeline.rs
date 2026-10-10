@@ -262,7 +262,7 @@ pub fn compile_translated_module(
         } else {
             request
                 .trace
-                .emit("\n=== Skipping mem2reg (full debug keeps locals in memory) ===");
+                .emit("\n=== Skipping mem2reg outside WGMMA functions (full debug keeps locals in memory) ===");
         }
     }
     prepare_mir_module(

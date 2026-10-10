@@ -63,7 +63,8 @@ operations, making targeted cuda-oxide rewrites easier to express. The
 
 Full variable-debug builds skip `mem2reg` and loop unrolling. Keeping source
 variables in stable memory locations gives cuda-gdb a better debugging
-experience.
+experience. A function that issues a WGMMA MMA is the exception: the WGMMA
+accumulator fusion reads SSA values, thus `mem2reg` runs on that function.
 
 ## Diagnosing locals that remain stack-backed
 

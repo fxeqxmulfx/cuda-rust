@@ -97,9 +97,9 @@ fn contains_multimem_blackwell_features(contents: &str) -> bool {
 
 /// Checks the PTX 8.6 floating-point extension to `redux.sync`.
 fn contains_redux_f32_features(contents: &str) -> bool {
-    contents
-        .split(';')
-        .any(|statement| statement.contains("redux.sync") && statement.contains(".f32"))
+    contains_instruction_family_modifier(contents, &["redux.sync"], "f32")
+        || contents.contains("@llvm.nvvm.redux.sync.fmax")
+        || contents.contains("@llvm.nvvm.redux.sync.fmin")
 }
 
 /// Checks for forward-compatible instructions whose minimum target is sm_90.

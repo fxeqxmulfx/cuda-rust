@@ -577,3 +577,46 @@ fn test_tma_multicast_detection_requires_cta_mask() {
     );
     assert!(!contains_tma_cta_group_features(unrelated_i32));
 }
+
+#[test]
+fn integer_redux_does_not_inherit_unrelated_f32_requirements() {
+    for integer in [
+        "redux.sync.max.u32 $0, $1, $2;",
+        "redux.sync.min.s32 $0, $1, $2;",
+        "declare i32 @llvm.nvvm.redux.sync.umax(i32, i32)",
+        "declare i32 @llvm.nvvm.redux.sync.max(i32, i32)",
+    ] {
+        for floating in [
+            "declare float @llvm.fma.f32(float, float, float)",
+            "ex2.approx.f32 $0, $1;",
+        ] {
+            for text in [
+                format!("{floating}\n{integer}"),
+                format!("{integer}\n{floating}"),
+            ] {
+                let requirements = detect_module_requirements_in_llvm_text(&text);
+                assert_eq!(requirements.features, DetectedFeatures::Sm80, "{text}");
+                assert_eq!(requirements.ptx_isa, PtxIsaRequirement::new(70));
+                assert!(arch_satisfies(
+                    &"sm_86".parse().unwrap(),
+                    requirements.features
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn floating_redux_assembly_and_llvm_keep_the_blackwell_requirement() {
+    for text in [
+        "redux.sync.max.f32 $0, $1, $2;",
+        "redux.sync.min.abs.NaN.f32 $0, $1, $2;",
+        "declare float @llvm.nvvm.redux.sync.fmax(i32, float)",
+        "declare float @llvm.nvvm.redux.sync.fmin.abs.NaN(i32, float)",
+    ] {
+        let features = detect_features_in_llvm_text(text);
+        assert!(features.contains(DetectedFeatures::ReduxF32), "{text}");
+        assert!(!arch_satisfies(&"sm_86".parse().unwrap(), features));
+        assert!(arch_satisfies(&"sm_100a".parse().unwrap(), features));
+    }
+}

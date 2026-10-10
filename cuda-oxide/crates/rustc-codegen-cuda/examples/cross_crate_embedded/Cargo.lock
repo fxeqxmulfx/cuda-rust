@@ -109,6 +109,8 @@ dependencies = [
  "cuda-device",
  "cuda-host",
  "embedded-kernel-lib",
+ "embedded-kernel-user-a",
+ "embedded-kernel-user-b",
 ]
 
 [[package]]
@@ -223,6 +225,26 @@ dependencies = [
  "cuda-core",
  "cuda-device",
  "cuda-host",
+]
+
+[[package]]
+name = "embedded-kernel-user-a"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
+ "embedded-kernel-lib",
+]
+
+[[package]]
+name = "embedded-kernel-user-b"
+version = "0.1.0"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
+ "embedded-kernel-lib",
 ]
 
 [[package]]

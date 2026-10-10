@@ -12,7 +12,7 @@ Make one commit with a test for each fix.
 - [x] `just clippy` and `just check` fail because of `clippy::replace_box` in
   the [pipeline tests](cuda-oxide/crates/cuda-macros/src/tests/pipeline.rs).
   Write `*input.block = syn::parse2(body).unwrap();`.
-- [ ] A generic kernel specialization is lost when only a library that does not
+- [x] A generic kernel specialization is lost when only a library that does not
   define the kernel instantiates it. No symbol refers to the bundle anchor of
   that library, so the linker does not extract the bundle. The merged module
   then does not contain the entry. Make the linker keep the bundle of each

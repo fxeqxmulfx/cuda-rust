@@ -13,7 +13,8 @@
 //! `load` function uses `load_ptx_bundles_merged_from_anchor` (because the
 //! module contains generic kernels). This merges the PTX bundles with
 //! specializations of `scale`, here the binary crate's bundle where the
-//! monomorphized PTX for `scale::<f32>` and `scale::<i32>` actually lives.
+//! monomorphized PTX for `scale::<f32>` and `scale::<i32>` actually lives,
+//! and the bundles of two libraries with `scale::<f64>`.
 //!
 //! Before the fix this would panic with:
 //!   DriverError(500, "named symbol not found")
@@ -81,6 +82,24 @@ fn main() {
                         got,
                         x * factor
                     );
+                }
+                errors += 1;
+            }
+        }
+    }
+
+    // scale::<f64>, launched by two libraries that do not define the kernel.
+    // Only the bundles of these libraries have this specialization.
+    {
+        let input: Vec<f64> = (0..N).map(|i| i as f64).collect();
+        let a = embedded_kernel_user_a::scale_f64(&module, &stream, 1.5, &input)
+            .expect("library A scale::<f64> launch");
+        let b = embedded_kernel_user_b::scale_f64(&module, &stream, 0.5, &input)
+            .expect("library B scale::<f64> launch");
+        for (i, &x) in input.iter().enumerate() {
+            if a[i] != x * 1.5 || b[i] != x * 0.5 {
+                if errors < 5 {
+                    eprintln!("  FAIL library scale::<f64>[{}]: {} {}", i, a[i], b[i]);
                 }
                 errors += 1;
             }

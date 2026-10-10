@@ -232,8 +232,12 @@ fn load_merged_module(
 /// definitions are renamed within their bundle. Only the first `.visible`
 /// definition of a function that a bundle declares `.extern` keeps its name,
 /// and these `.extern` declarations refer to it. Kernel identities remain.
-/// Duplicate kernel definitions, including identical definitions, are rejected
-/// before invoking the driver; typed loaders require an unambiguous entry.
+/// Each crate that instantiates a generic kernel specialization defines its
+/// entry. When the definitions have the same header, the merge keeps the
+/// first one and removes the others. A bundle that keeps DWARF sections
+/// renames them instead, because these sections refer to their labels. Other
+/// duplicate kernel definitions are rejected before invoking the driver;
+/// typed loaders require an unambiguous entry.
 pub fn merge_ptx_bundles<'a>(
     bundles: impl IntoIterator<Item = &'a OwnedArtifactBundle>,
 ) -> Result<String, EmbeddedModuleError> {
@@ -452,6 +456,9 @@ struct PtxMergeState<'source> {
     extern_definitions: HashMap<&'source str, usize>,
     /// The names of the defined kernel entries of all bundles, in bundle order.
     entries: Vec<&'source str>,
+    /// The bundle indices and names of the generic kernel entries that an
+    /// earlier bundle also defines.
+    repeated_entries: HashSet<(usize, &'source str)>,
 }
 
 impl<'source> PtxMergeState<'source> {
@@ -519,14 +526,23 @@ impl<'source> PtxMergeState<'source> {
                             .or_insert(index);
                     }
                     ptx_parse::CallableKind::Entry if defined => {
-                        if let Some(first) = entries.insert(callable.name(), index) {
+                        let Some(&(first, first_callable)) = entries.get(callable.name()) else {
+                            entries.insert(callable.name(), (index, callable));
+                            state.entries.push(callable.name());
+                            continue;
+                        };
+                        let repeated_specialization = first != index
+                            && crate::entry_registry::split_type_id_name(callable.name()).is_some()
+                            && definition_header(&documents[first].1, first_callable)
+                                .eq(definition_header(document, callable));
+                        if !repeated_specialization {
                             return Err(EmbeddedModuleError::ConflictingEntry {
                                 entry: callable.name().to_string(),
                                 first: documents[first].0.to_string(),
                                 second: name.to_string(),
                             });
                         }
-                        state.entries.push(callable.name());
+                        state.repeated_entries.insert((index, callable.name()));
                     }
                     _ => {}
                 }
@@ -540,9 +556,9 @@ impl<'source> PtxMergeState<'source> {
 }
 
 /// Strip the headers, strip the DWARF sections if an earlier bundle has
-/// them, shift debug indices past the previous bundles, rename the private
-/// symbols, and link the `.extern` declarations. Returns the rewritten text
-/// and its highest debug file index.
+/// them, remove the repeated generic kernel entries, shift debug indices past
+/// the previous bundles, rename the private symbols, and link the `.extern`
+/// declarations. Returns the rewritten text and its highest debug file index.
 fn prepare_bundle_body(
     document: &ptx_parse::Document,
     bundle_name: &str,
@@ -562,8 +578,31 @@ fn prepare_bundle_body(
     // NVVM reflection string. Keep definitions and all references artifact-local
     // without changing kernel entry identities or explicit extern link names.
     let mut local_symbols = HashSet::new();
-    let mut removed_sections = Vec::new();
+    let mut removed = Vec::new();
+    for callable in document.callables() {
+        if callable.kind() == ptx_parse::CallableKind::Entry
+            && state.repeated_entries.contains(&(index, callable.name()))
+        {
+            // The DWARF sections refer to the labels of the entry.
+            if state.debug_sections == Some(index) {
+                local_symbols.insert(callable.name());
+            } else {
+                let span = callable.span();
+                let end = span.end + usize::from(ptx[span.end..].starts_with('\n'));
+                edits
+                    .delete(span.start..end)
+                    .map_err(|error| invalid_ptx(error.to_string()))?;
+                removed.push(span.start..end);
+            }
+        }
+    }
     for directive in document.directives() {
+        if removed
+            .iter()
+            .any(|span| span.contains(&directive.span().start))
+        {
+            continue;
+        }
         match directive.name() {
             ".version" | ".target" => {
                 edits
@@ -594,7 +633,7 @@ fn prepare_bundle_body(
                 edits
                     .delete(line.start..end)
                     .map_err(|error| invalid_ptx(error.to_string()))?;
-                removed_sections.push(line.start..end);
+                removed.push(line.start..end);
             }
             // A module-scope variable without a linkage directive.
             ".global" | ".const" | ".shared" if directive.scope() == ptx_parse::ScopeId::ROOT => {
@@ -658,9 +697,9 @@ fn prepare_bundle_body(
         let text = token.text(ptx);
         if token.kind() == ptx_parse::TokenKind::Word
             && local_symbols.contains(text)
-            && !removed_sections
+            && !removed
                 .iter()
-                .any(|section| section.contains(&token.span().start))
+                .any(|span| span.contains(&token.span().start))
         {
             edits
                 .replace(token.span(), format!("{prefix}{text}"))
@@ -677,6 +716,18 @@ fn prepare_bundle_body(
 /// Whether a `.section` directive with `arguments` opens a DWARF section.
 fn is_debug_section(arguments: &str) -> bool {
     arguments.trim_start().starts_with(".debug_")
+}
+
+/// The tokens of the text before the body of a callable definition, without
+/// trivia: the linkage, the name, the parameters and the directives.
+fn definition_header<'document>(
+    document: &'document ptx_parse::Document,
+    callable: &ptx_parse::Callable,
+) -> impl Iterator<Item = &'document str> {
+    let span = callable
+        .definition_header_span()
+        .unwrap_or_else(|| callable.header_span());
+    span_tokens(document, span).map(move |token| token.text(document.source()))
 }
 
 /// The non-trivia tokens in `span`.
@@ -1000,10 +1051,59 @@ mod tests {
                 result => panic!("expected conflicting entry: {result:?}"),
             }
         }
-        assert!(matches!(
-            merge_ptx_bundles([&first, &first]),
-            Err(EmbeddedModuleError::ConflictingEntry { .. })
-        ));
+    }
+
+    /// Each crate that instantiates a generic kernel specialization defines
+    /// its entry.
+    #[test]
+    fn keeps_the_first_definition_of_a_repeated_specialization() {
+        let name = "scale_TID_0123456789abcdef0123456789abcdef";
+        let library = |crate_name: &str, other: &str, debug: &str| {
+            ptx_bundle(
+                crate_name,
+                &format!(
+                    ".version 8.9\n.target sm_80\n.address_size 64\n.file 1 \"{crate_name}.rs\"\n.func helper() {{ ret; }}\n.visible .entry {name}(.param .u64 {name}_param_0)\n{{\n$L__func_begin0:\n\t.loc\t1 2 3\n\tcall helper, ();\n\tret;\n}}\n.visible .entry {other}() {{ ret; }}\n{debug}"
+                ),
+            )
+        };
+        let first = library("first", "a", "");
+        let second = library("second", "b", "");
+        assert_eq!(
+            merge_ptx_bundles([&first, &second]).unwrap(),
+            format!(
+                "\
+.version 8.9
+.target sm_80
+.address_size 64
+.file 1 \"first.rs\"
+.func cuda_oxide_merge_0_helper() {{ ret; }}
+.visible .entry {name}(.param .u64 {name}_param_0)
+{{
+$L__func_begin0:
+\t.loc\t1 2 3
+\tcall cuda_oxide_merge_0_helper, ();
+\tret;
+}}
+.visible .entry a() {{ ret; }}
+.file 2 \"second.rs\"
+.func cuda_oxide_merge_1_helper() {{ ret; }}
+.visible .entry b() {{ ret; }}
+"
+            )
+        );
+        let (_, entries) = merge_ptx_bundles_with_entries([&second, &first]).unwrap();
+        assert_eq!(entries, [name, "b", "a"]);
+
+        let debug = library(
+            "debug",
+            "b",
+            "\t.section\t.debug_info\n\t{\n.b64 $L__func_begin0\n\t}\n",
+        );
+        let (merged, entries) = merge_ptx_bundles_with_entries([&first, &debug]).unwrap();
+        assert_eq!(entries, [name, "a", "b"]);
+        assert!(merged.contains(&format!(
+            ".visible .entry cuda_oxide_merge_1_{name}(.param .u64 {name}_param_0)"
+        )));
     }
 
     #[test]

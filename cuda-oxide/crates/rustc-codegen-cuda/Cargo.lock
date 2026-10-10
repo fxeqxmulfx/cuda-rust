@@ -746,6 +746,7 @@ dependencies = [
  "llvm-export",
  "mir-importer",
  "mir-lower",
+ "object",
  "once_cell",
  "oxide-artifacts",
  "pliron",

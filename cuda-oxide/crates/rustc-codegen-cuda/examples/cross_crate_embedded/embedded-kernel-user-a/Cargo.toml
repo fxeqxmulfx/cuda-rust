@@ -1,0 +1,11 @@
+[package]
+name = "embedded-kernel-user-a"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+cuda-core = { path = "../../../../../../cuda-core" }
+cuda-device = { path = "../../../../cuda-device" }
+cuda-host   = { path = "../../../../cuda-host" }
+embedded-kernel-lib = { path = "../embedded-kernel-lib" }

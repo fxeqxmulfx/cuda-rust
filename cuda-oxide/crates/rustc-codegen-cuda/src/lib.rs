@@ -299,6 +299,8 @@
 //! - `generated_intrinsics`: Generated intrinsic definitions and dispatch
 //! - `materialize`: Strict, opt-in build-time finalization of embedded device
 //!   artifacts
+//! - `upstream_artifacts`: Keeps the artifact objects of upstream crates that
+//!   instantiate generic kernels
 
 #![feature(rustc_private)]
 
@@ -317,6 +319,7 @@ extern crate rustc_metadata;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
+extern crate rustc_structures;
 extern crate rustc_target;
 
 // rustc_public (stable MIR) and its bridge - for calling mir-importer
@@ -330,6 +333,7 @@ mod collector;
 mod device_codegen;
 mod generated_intrinsics;
 mod materialize;
+mod upstream_artifacts;
 
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo, ModuleKind};
@@ -868,10 +872,11 @@ impl CodegenBackend for CudaCodegenBackend {
         &self,
         sess: &Session,
         compiled_modules: CompiledModules,
-        crate_info: CrateInfo,
+        mut crate_info: CrateInfo,
         metadata: EncodedMetadata,
         outputs: &OutputFilenames,
     ) {
+        upstream_artifacts::retain_specialization_artifacts(sess, &mut crate_info);
         self.llvm_backend
             .link(sess, compiled_modules, crate_info, metadata, outputs);
     }

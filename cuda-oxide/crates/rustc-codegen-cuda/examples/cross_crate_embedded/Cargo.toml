@@ -5,9 +5,9 @@ edition = "2024"
 authors = ["Nihal Pasham <nihalp@nvidia.com>"]
 license = "Apache-2.0"
 
-# Standalone workspace so the nested kernel crate can be a workspace member.
+# Standalone workspace so the nested crates can be workspace members.
 [workspace]
-members = ["embedded-kernel-lib"]
+members = ["embedded-kernel-lib", "embedded-kernel-user-a", "embedded-kernel-user-b"]
 
 [dependencies]
 # Named distinctly from cross_crate_kernel's `kernel-lib`: CI builds all
@@ -15,6 +15,8 @@ members = ["embedded-kernel-lib"]
 # same (name, version) alias each other's cache slot there, so the second
 # example links whichever library was compiled first.
 embedded-kernel-lib = { path = "embedded-kernel-lib" }
+embedded-kernel-user-a = { path = "embedded-kernel-user-a" }
+embedded-kernel-user-b = { path = "embedded-kernel-user-b" }
 cuda-device  = { path = "../../../cuda-device" }
 cuda-host    = { path = "../../../cuda-host" }
 cuda-core = { path = "../../../../../cuda-core" }

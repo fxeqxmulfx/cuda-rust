@@ -384,7 +384,7 @@ fn cfg_gated_generic_uses_the_same_gate_for_marker_and_loader() {
         "loader selection must inherit the generic kernel's cfg:\n{expanded}"
     );
     assert!(
-            expanded.contains(&format!("if__cuda_oxide_has_enabled_generic_kernel{{let_=name;::cuda_host::load_all_ptx_bundles_merged(ctx)?}}else{{{ANCHORED_EMBEDDED_LOADER}}}")),
+            expanded.contains(&format!("if__cuda_oxide_has_enabled_generic_kernel{{let_=name;{ANCHORED_MERGED_LOADER}}}else{{{ANCHORED_EMBEDDED_LOADER}}}")),
             "loader must fall back to the embedded artifact when no generic kernel is enabled:\n{expanded}"
         );
 }
@@ -398,6 +398,18 @@ const ANCHORED_EMBEDDED_LOADER: &str = concat!(
     "#[cfg(not(any(target_os=\"linux\",target_os=\"android\")))]",
     "{let_=anchor;::cuda_host::load_embedded_module(ctx,name)?}",
     "}::core::option::Option::None=>::cuda_host::load_embedded_module(ctx,name)?,}",
+);
+
+/// The merged loader of a generic module: merge the PTX bundles of the binary
+/// that maps the artifact anchor, or of the executable when no anchor was
+/// referenced.
+const ANCHORED_MERGED_LOADER: &str = concat!(
+    "match__cuda_oxide_artifact_anchor{::core::option::Option::Some(anchor)=>{",
+    "#[cfg(any(target_os=\"linux\",target_os=\"android\"))]",
+    "{::cuda_host::load_all_ptx_bundles_merged_from_anchor(ctx,anchor)?}",
+    "#[cfg(not(any(target_os=\"linux\",target_os=\"android\")))]",
+    "{let_=anchor;::cuda_host::load_all_ptx_bundles_merged(ctx)?}",
+    "}::core::option::Option::None=>::cuda_host::load_all_ptx_bundles_merged(ctx)?,}",
 );
 
 #[test]

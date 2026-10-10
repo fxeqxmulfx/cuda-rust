@@ -187,6 +187,23 @@ pub(crate) fn expand_cuda_module_inner(
             ::core::option::Option::None => ::cuda_host::load_embedded_module(ctx, name)?,
         }
     };
+    // The merged load of a generic module reads the same image.
+    let merged_module_loader = quote! {
+        match __cuda_oxide_artifact_anchor {
+            ::core::option::Option::Some(anchor) => {
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                {
+                    ::cuda_host::load_all_ptx_bundles_merged_from_anchor(ctx, anchor)?
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                {
+                    let _ = anchor;
+                    ::cuda_host::load_all_ptx_bundles_merged(ctx)?
+                }
+            }
+            ::core::option::Option::None => ::cuda_host::load_all_ptx_bundles_merged(ctx)?,
+        }
+    };
     let module_loader = if has_generic {
         // A syntactically present generic kernel may be removed by cfg. Make
         // the loader decision under the exact same effective cfg chain as its
@@ -197,7 +214,7 @@ pub(crate) fn expand_cuda_module_inner(
             #(#enable_generic_loader_statements)*
             let module = if __cuda_oxide_has_enabled_generic_kernel {
                 let _ = name; // merged load ignores the crate-name hint
-                ::cuda_host::load_all_ptx_bundles_merged(ctx)?
+                #merged_module_loader
             } else {
                 #embedded_module_loader
             };

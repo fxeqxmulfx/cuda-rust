@@ -583,8 +583,9 @@ pub struct __ReadOnlyTile<T: __TileElement> {
 
 impl<T: __TileElement> __ReadOnlyTile<T> {
     /// # Safety
-    /// `pointer` must address `len` initialized, properly aligned elements in
-    /// the current block's shared memory. All block threads must have finished
+    /// `pointer` must be non-null and properly aligned, also when `len` is
+    /// zero. It must address `len` initialized elements in the current block's
+    /// shared memory. All block threads must have finished
     /// initialization and synchronized. No writes may occur while this guard or
     /// its derived borrows are live. The guard must not escape the invocation.
     #[inline(always)]
@@ -594,13 +595,10 @@ impl<T: __TileElement> __ReadOnlyTile<T> {
 
     #[inline(always)]
     pub fn as_slice(&self) -> &[T] {
-        // SAFETY: the constructor establishes initialization, alignment,
-        // visibility, and immutability. The borrow cannot outlive this guard.
-        if self.len == 0 {
-            &[]
-        } else {
-            unsafe { core::slice::from_raw_parts(self.pointer, self.len) }
-        }
+        // SAFETY: the constructor establishes a non-null pointer,
+        // initialization, alignment, visibility, and immutability. The borrow
+        // cannot outlive this guard.
+        unsafe { core::slice::from_raw_parts(self.pointer, self.len) }
     }
 }
 
@@ -727,6 +725,17 @@ mod block_tile_tests {
             assert_eq!(tile.load(64, 0), 0);
             assert_eq!(tile.load(0, columns), 0);
         }
+    }
+
+    #[test]
+    fn read_only_tile_borrows_empty_and_nonempty_extents() {
+        let data = [3u32, 5, 7];
+        // SAFETY: the pointer is non-null and aligned, and nothing writes the
+        // array while the guards are live.
+        let tile = unsafe { super::__ReadOnlyTile::from_initialized(data.as_ptr(), 3) };
+        assert_eq!(tile.as_slice(), &data);
+        let empty = unsafe { super::__ReadOnlyTile::from_initialized(data.as_ptr(), 0) };
+        assert!(empty.as_slice().is_empty());
     }
 
     #[test]

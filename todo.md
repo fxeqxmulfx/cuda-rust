@@ -35,7 +35,7 @@ Make one commit with a test for each fix.
 Examine the PTX of the `block_shared` and `block_pipeline` examples before and
 after each device fix.
 
-- [ ] [`__ReadOnlyTile::as_slice`](cuda-oxide/crates/cuda-device/src/shared.rs)
+- [x] [`__ReadOnlyTile::as_slice`](cuda-oxide/crates/cuda-device/src/shared.rs)
   returns `&[]` for an empty tile. The `select` between that global address
   and the shared pointer changes the tile reads to generic `ld`. Remove the
   branch: `from_raw_parts` accepts a length of zero with a non-null, aligned

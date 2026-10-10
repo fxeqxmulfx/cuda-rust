@@ -167,6 +167,27 @@ Commit: `2f164ea7`.
 - The benchmark runner gives `--features smoke-test`. GEMM smoke tests use 256
   and 512 square matrices. Commit: `f8f89296`.
 
+### Full-Debug Builds
+
+`scripts/smoketest.sh --full-debug` builds each example with `--device-debug`.
+Full debug does not run mem2reg, thus each local stays in a stack slot. These
+examples did not compile. `main` has the same failures.
+
+- `warp_sums` and `partial_warp_reduce`: the translator gave an entry slot to
+  each local of a dropped panic block, and the lowering refused the
+  `core::fmt::rt::ArgumentType` of these unused slots. Now the translator
+  removes each entry slot that no operation uses. Commit: `eb4fbb93`.
+- `packed_aggregate_abi`: the packed shared-pointer carrier of a local accepted
+  only a packed struct with one direct shared pointer. Now a local accepts the
+  same packed shapes as the internal device ABI. Commit: `91f63aed`.
+- `iket_trace`: the pipeline refused each kernel with IKET operations. Now IKET
+  materialization does not need the SSA form of the range tokens. Commit:
+  `7ce8edc2`.
+- `wgmma_mma_bf16`: the WGMMA accumulator fusion reads SSA values, thus the
+  backend refused the kernels. Now full debug runs mem2reg on each function
+  that issues a WGMMA MMA, and `mir.dbg_value` keeps the named locals of these
+  functions visible. Commit: `f893a88d`.
+
 ## Maintenance
 
 - Rust 1.99.0 stable and nightly-2026-10-09 (rustc 1.101.0). Commit:
@@ -185,3 +206,5 @@ Commit: `2f164ea7`.
 - No `oxide` cargo alias in `cuda-oxide/`. In a checkout, an installed
   `cargo oxide` runs the `cargo-oxide` of the checkout. Commit: `770f211e`.
 - No unused feature in a macro test. Commit: `d21dda9a`.
+- A CI job builds every example with full debug
+  (`scripts/smoketest.sh --full-debug`). Commit: `1cea6ad0`.

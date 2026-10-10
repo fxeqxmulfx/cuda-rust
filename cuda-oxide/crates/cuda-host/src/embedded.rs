@@ -182,7 +182,7 @@ fn load_merged_ptx_bundles(
     ctx: &Arc<CudaContext>,
     bundles: &[OwnedArtifactBundle],
 ) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
-    let merged = merge_ptx_bundles(bundles)?;
+    let (merged, entries) = merge_ptx_bundles_with_entries(bundles)?;
 
     let module = ctx.load_module_from_image(merged.as_bytes())?;
     // Retain the merged module's `.entry` names (a few dozen bytes per
@@ -190,7 +190,7 @@ fn load_merged_ptx_bundles(
     // same-base entry exists under a different hash, the launch paths can
     // then report a host/device type-identity naming divergence instead of an
     // opaque "named symbol not found". See `crate::entry_registry`.
-    crate::entry_registry::register_merged_module_entries(&module, &merged);
+    crate::entry_registry::register_merged_module_entries(&module, &entries);
     Ok(module)
 }
 
@@ -214,6 +214,14 @@ fn load_merged_ptx_bundles(
 pub fn merge_ptx_bundles<'a>(
     bundles: impl IntoIterator<Item = &'a OwnedArtifactBundle>,
 ) -> Result<String, EmbeddedModuleError> {
+    merge_ptx_bundles_with_entries(bundles).map(|(merged, _)| merged)
+}
+
+/// Merge the bundles as [`merge_ptx_bundles`] does. Also return the names of
+/// the kernel entries of the merged module, in the order of the module.
+pub(crate) fn merge_ptx_bundles_with_entries<'a>(
+    bundles: impl IntoIterator<Item = &'a OwnedArtifactBundle>,
+) -> Result<(String, Vec<&'a str>), EmbeddedModuleError> {
     let mut documents = Vec::new();
     for bundle in bundles {
         if let Some(bytes) = bundle.payload(ArtifactPayloadKind::Ptx) {
@@ -255,7 +263,7 @@ pub fn merge_ptx_bundles<'a>(
             merged.push('\n');
         }
     }
-    Ok(merged)
+    Ok((merged, state.entries))
 }
 
 /// PTX ISA version from a `.version` directive, as (major, minor).
@@ -330,7 +338,7 @@ impl std::fmt::Display for PtxTarget {
     }
 }
 
-/// The facts about all bundles that the merge of each bundle uses.
+/// The facts about all bundles that the merge uses.
 #[derive(Default)]
 struct PtxMergeState<'source> {
     /// The highest `.version` of all bundles.
@@ -342,6 +350,8 @@ struct PtxMergeState<'source> {
     /// For each function that a bundle declares `.extern`, the index of the
     /// first bundle with a `.visible` definition of it.
     extern_definitions: HashMap<&'source str, usize>,
+    /// The names of the defined kernel entries of all bundles, in bundle order.
+    entries: Vec<&'source str>,
 }
 
 impl<'source> PtxMergeState<'source> {
@@ -416,6 +426,7 @@ impl<'source> PtxMergeState<'source> {
                                 second: name.to_string(),
                             });
                         }
+                        state.entries.push(callable.name());
                     }
                     _ => {}
                 }
@@ -904,6 +915,36 @@ mod tests {
         assert!(matches!(
             merge_ptx_bundles([&bundle]),
             Err(EmbeddedModuleError::ConflictingEntry { .. })
+        ));
+    }
+
+    /// The registry of `.entry` names uses the names from the merge, and does
+    /// not parse the merged module again.
+    #[test]
+    fn returns_the_entry_names_of_the_merged_module() {
+        let first = ptx_bundle(
+            "first",
+            ".version 8.9\n.target sm_80\n.address_size 64\n.visible .func helper() { ret; }\n.visible .entry a() { ret; }\n.visible .entry b() { ret; }\n",
+        );
+        let second = ptx_bundle(
+            "second",
+            ".version 8.9\n.target sm_80\n.address_size 64\n.visible .entry c() { ret; }\n",
+        );
+        for bundles in [[&first, &second], [&second, &first]] {
+            let (merged, entries) = merge_ptx_bundles_with_entries(bundles).unwrap();
+            let document = ptx_parse::Document::parse(&merged).unwrap();
+            let parsed: Vec<_> = document
+                .callables()
+                .iter()
+                .filter(|callable| callable.kind() == ptx_parse::CallableKind::Entry)
+                .map(|callable| callable.name())
+                .collect();
+            assert_eq!(entries, parsed);
+        }
+        // `ptx-parse` fails on an unterminated block comment.
+        assert!(matches!(
+            merge_ptx_bundles_with_entries([&ptx_bundle("broken", "/* unterminated")]),
+            Err(EmbeddedModuleError::InvalidPtx { .. })
         ));
     }
 

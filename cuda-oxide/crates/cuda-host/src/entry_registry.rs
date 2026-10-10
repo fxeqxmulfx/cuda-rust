@@ -20,7 +20,7 @@
 //! opaque `DriverError(500, "named symbol not found")`.
 //!
 //! To make that failure self-explaining, [`crate::load_all_ptx_bundles_merged`]
-//! retains the `.entry` names it already parses out of the merged PTX. When a
+//! retains the `.entry` names that the merge found in the bundles. When a
 //! generic-kernel lookup later misses, the macro-generated launch paths call
 //! [`diagnose_generic_kernel_load_error`] /
 //! [`panic_generic_kernel_load_failed`]: if the module holds the same base
@@ -113,30 +113,11 @@ fn merged_module_entries() -> &'static EntryRegistry<CudaModule> {
 
 /// Retains the `.entry` names of a freshly merged-and-loaded PTX module.
 ///
-/// Best-effort by design: if `ptx-parse` cannot parse the merged text that the
-/// driver accepted, nothing is retained and a later lookup miss simply keeps
-/// the ordinary driver error. Registration must never fail a load that the
-/// driver was happy with.
-pub(crate) fn register_merged_module_entries(module: &Arc<CudaModule>, merged_ptx: &str) {
-    if let Some(entries) = entry_names_from_ptx(merged_ptx) {
-        merged_module_entries().register(module, entries);
-    }
-}
-
-/// Parses PTX text and returns the names of its `.entry` kernels.
-///
-/// `.func` device helpers are excluded: only `.entry` symbols are launchable,
-/// and only they participate in `_TID_` lookup.
-fn entry_names_from_ptx(ptx: &str) -> Option<Vec<String>> {
-    let document = ptx_parse::Document::parse(ptx).ok()?;
-    Some(
-        document
-            .callables()
-            .iter()
-            .filter(|callable| callable.kind() == ptx_parse::CallableKind::Entry)
-            .map(|callable| callable.name().to_string())
-            .collect(),
-    )
+/// `.func` device helpers are not in `entries`: only `.entry` symbols are
+/// launchable, and only they participate in `_TID_` lookup.
+pub(crate) fn register_merged_module_entries(module: &Arc<CudaModule>, entries: &[&str]) {
+    let entries = entries.iter().map(|entry| entry.to_string()).collect();
+    merged_module_entries().register(module, entries);
 }
 
 /// Splits `<base>_TID_<hex32>` into `(base, hex32)`.
@@ -270,10 +251,11 @@ mod tests {
         DriverError(cuda_core::sys::cudaError_enum_CUDA_ERROR_NOT_FOUND)
     }
 
-    /// PTX in the same form the merged-bundle loader retains: `.entry`
-    /// kernels plus a `.func` helper that must never be diagnosed.
-    fn merged_ptx() -> String {
-        format!(
+    /// The entry names that the merge finds in PTX with `.entry` kernels plus
+    /// a `.func` helper that must never be diagnosed.
+    fn merged_entries() -> Vec<String> {
+        use crate::embedded::{ArtifactCompileOptions, ArtifactPayloadKind, OwnedArtifactBundle};
+        let ptx = format!(
             "\
 .version 8.3
 .target sm_80
@@ -291,28 +273,34 @@ mod tests {
     ret;
 }}
 "
-        )
+        );
+        let bundle = OwnedArtifactBundle {
+            name: "merged".to_string(),
+            target: "sm_80".to_string(),
+            compile_options: ArtifactCompileOptions::new(),
+            payloads: vec![oxide_artifacts::OwnedArtifactPayload {
+                kind: ArtifactPayloadKind::Ptx,
+                name: "merged".to_string(),
+                bytes: ptx.into_bytes(),
+            }],
+            entries: Vec::new(),
+        };
+        let (_, entries) = crate::embedded::merge_ptx_bundles_with_entries([&bundle])
+            .expect("valid PTX must merge");
+        entries.into_iter().map(str::to_string).collect()
     }
 
     #[test]
-    fn entry_names_come_from_real_ptx_parse() {
-        let entries = entry_names_from_ptx(&merged_ptx()).expect("valid PTX must parse");
+    fn entry_names_come_from_the_merge() {
         assert_eq!(
-            entries,
+            merged_entries(),
             vec![format!("scale_TID_{HASH_A}"), "vecadd".to_string()]
         );
     }
 
     #[test]
-    fn unparseable_ptx_retains_nothing() {
-        // `ptx-parse` only hard-fails on lexically ambiguous sources, such as
-        // an unterminated block comment; structural noise is tolerated.
-        assert_eq!(entry_names_from_ptx("/* unterminated"), None);
-    }
-
-    #[test]
     fn divergence_fires_with_both_names_for_same_base_different_hash() {
-        let entries = entry_names_from_ptx(&merged_ptx()).expect("valid PTX must parse");
+        let entries = merged_entries();
         let requested = format!("scale_TID_{HASH_B}");
         let divergent = divergent_entries_in(&entries, &requested);
         assert_eq!(divergent, vec![format!("scale_TID_{HASH_A}")]);
@@ -340,7 +328,7 @@ mod tests {
 
     #[test]
     fn unrelated_miss_keeps_the_ordinary_error() {
-        let entries = entry_names_from_ptx(&merged_ptx()).expect("valid PTX must parse");
+        let entries = merged_entries();
         // Different base kernel: no same-base entry, so no diagnosis.
         let requested = format!("reduce_TID_{HASH_B}");
         assert!(divergent_entries_in(&entries, &requested).is_empty());
@@ -350,7 +338,7 @@ mod tests {
 
     #[test]
     fn func_helpers_never_participate_in_the_diagnosis() {
-        let entries = entry_names_from_ptx(&merged_ptx()).expect("valid PTX must parse");
+        let entries = merged_entries();
         // `helper_TID_<hashA>` exists only as a `.func`; requesting the same
         // base with a different hash must not claim a divergence.
         let requested = format!("helper_TID_{HASH_B}");
@@ -397,7 +385,7 @@ mod tests {
 
     #[test]
     fn diagnosis_panics_with_both_names_through_the_message_builder() {
-        let entries = entry_names_from_ptx(&merged_ptx()).expect("valid PTX must parse");
+        let entries = merged_entries();
         let requested = format!("scale_TID_{HASH_B}");
         let divergent = divergent_entries_in(&entries, &requested);
         let outcome = std::panic::catch_unwind(|| {

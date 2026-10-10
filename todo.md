@@ -66,7 +66,7 @@ after each device fix.
   [`EditScript::replace`](cuda-oxide/crates/ptx-parse/src/edit.rs) finds
   overlaps with a linear search, so a merge is O(n²) in the number of edits.
   Keep the edits sorted and use a binary search.
-- [ ] Host, one time for each module load:
+- [x] Host, one time for each module load:
   [`register_merged_module_entries`](cuda-oxide/crates/cuda-host/src/entry_registry.rs)
   parses the merged PTX again. Use the entry names that the merge found.
 - [ ] [FP8 emulation](cutile-rs/cutile-ir/src/emulation.rs) changes FP8

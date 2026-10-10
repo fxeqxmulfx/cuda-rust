@@ -51,7 +51,7 @@ after each device fix.
   element gets `mul.hi.u64`, `mul.lo.s64` and two overflow checks. Check the
   start and the end of each tile one time. Then compare only `src < len` for
   each element, or nothing when all of the tile is in the limits.
-- [ ] The pipeline copies 4 or 8 bytes with each `cp.async.ca`. Add a 16-byte
+- [x] The pipeline copies 4 or 8 bytes with each `cp.async.ca`. Add a 16-byte
   `cp.async.cg` path when `columns` and `stride` are multiples of 16 bytes.
   Check the alignment of the source address one time for each tile.
 - [ ] Each [`striped_index`](cuda-oxide/crates/cuda-device/src/thread.rs) call

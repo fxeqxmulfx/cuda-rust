@@ -117,6 +117,9 @@ struct CopyGroup {
     types: Vec<proc_macro2::TokenStream>,
     limits: Vec<proc_macro2::TokenStream>,
     stores: Vec<proc_macro2::TokenStream>,
+    swizzled: bool,
+    aligned: Vec<proc_macro2::TokenStream>,
+    vector_stores: Vec<proc_macro2::TokenStream>,
 }
 pub(crate) struct BlockPipeline {
     rows: Expr,
@@ -410,6 +413,8 @@ impl BlockPipeline {
                 8u32,
             )
         };
+        // Elements in one 16-byte copy.
+        let vector = quote! { (16 / ::core::mem::size_of::<#element>()) };
         for (i, source) in self.sources.iter().enumerate() {
             let name = &source.name;
             let columns = remap(&source.columns);
@@ -449,6 +454,9 @@ impl BlockPipeline {
                         types: Vec::new(),
                         limits: Vec::new(),
                         stores: Vec::new(),
+                        swizzled: false,
+                        aligned: Vec::new(),
+                        vector_stores: Vec::new(),
                     });
                     copy_groups.last_mut().unwrap()
                 };
@@ -474,6 +482,21 @@ impl BlockPipeline {
                         #copy(dst.cast::<u32>(), #tile.wrapping_add(__cuda_pipeline_src).cast::<u8>(), size);
                     }
                 });
+                // The XOR layout moves single elements, so it has no 16-byte copy.
+                group.swizzled |= source.swizzle;
+                group
+                    .aligned
+                    .push(quote! { (#total) % #vector == 0 && #tile.addr() % 16 == 0 });
+                group.vector_stores.push(quote! {
+                    // SAFETY: as for the copy of one element. The layout and the
+                    // tile addresses are 16-byte aligned, and `size` includes only
+                    // the elements in the source slice.
+                    unsafe {
+                        let dst = #pointer.add(__cuda_pipeline_copy_slot * __cuda_pipeline_extent + #total + __cuda_pipeline_lane);
+                        let size = (#limit.saturating_sub(__cuda_pipeline_src).min(#vector) * ::core::mem::size_of::<#element>()) as ::core::primitive::u32;
+                        ::cuda_device::async_copy::cp_async_cg_zfill_16(dst.cast::<u32>(), #tile.wrapping_add(__cuda_pipeline_src).cast::<u8>(), size);
+                    }
+                });
             } else {
                 views.push(quote! {
                     let __cuda_pipeline_base = (#iteration).checked_mul(#rows).and_then(|n| n.checked_mul(#stride)).and_then(|n| n.checked_add(#offset)).unwrap_or(::core::primitive::usize::MAX);
@@ -483,23 +506,43 @@ impl BlockPipeline {
             total = quote! { (#total + #rows * #columns) };
         }
         let copy_threads = self.threads as usize;
-        let copies: Vec<_> = copy_groups.into_iter().map(|CopyGroup { columns, stride, offset, types, limits, stores, .. }| quote! {
-            #(#types)*
-            // Check the overflow one time for each tile. An element is at
-            // `base + src` of the source slice. A saturated base is not in
-            // the limits of a slice.
-            let __cuda_pipeline_base = (#copy_iteration).saturating_mul(#rows)
-                .saturating_mul(#stride)
-                .saturating_add(#offset);
-            #(#limits)*
-            let mut __cuda_pipeline_lane = ::cuda_device::thread::threadIdx_x() as ::core::primitive::usize;
-            while __cuda_pipeline_lane < #rows * #columns {
-                let __cuda_pipeline_row = __cuda_pipeline_lane / #columns;
-                let __cuda_pipeline_col = __cuda_pipeline_lane % #columns;
-                // `bytes` makes sure that this does not overflow.
-                let __cuda_pipeline_src = __cuda_pipeline_row.wrapping_mul(#stride).wrapping_add(__cuda_pipeline_col);
-                #(#stores)*
-                __cuda_pipeline_lane += #copy_threads;
+        let copies: Vec<_> = copy_groups.into_iter().map(|CopyGroup { columns, stride, offset, types, limits, stores, swizzled, aligned, vector_stores, .. }| {
+            let copy_loop = |scale: proc_macro2::TokenStream, stores: &[proc_macro2::TokenStream]| quote! {
+                let mut __cuda_pipeline_lane = ::cuda_device::thread::threadIdx_x() as ::core::primitive::usize #scale;
+                while __cuda_pipeline_lane < #rows * #columns {
+                    let __cuda_pipeline_row = __cuda_pipeline_lane / #columns;
+                    let __cuda_pipeline_col = __cuda_pipeline_lane % #columns;
+                    // `bytes` makes sure that this does not overflow.
+                    let __cuda_pipeline_src = __cuda_pipeline_row.wrapping_mul(#stride).wrapping_add(__cuda_pipeline_col);
+                    #(#stores)*
+                    __cuda_pipeline_lane += #copy_threads #scale;
+                }
+            };
+            let scalar = copy_loop(quote! {}, &stores);
+            let copy = if swizzled {
+                scalar
+            } else {
+                let vector_loop = copy_loop(quote! { * #vector }, &vector_stores);
+                quote! {
+                    // Copy 16 bytes with each instruction when the layout and
+                    // the tile addresses permit it.
+                    if #columns % #vector == 0 && #stride % #vector == 0 && __cuda_pipeline_extent % #vector == 0 #(&& #aligned)* {
+                        #vector_loop
+                    } else {
+                        #scalar
+                    }
+                }
+            };
+            quote! {
+                #(#types)*
+                // Check the overflow one time for each tile. An element is at
+                // `base + src` of the source slice. A saturated base is not in
+                // the limits of a slice.
+                let __cuda_pipeline_base = (#copy_iteration).saturating_mul(#rows)
+                    .saturating_mul(#stride)
+                    .saturating_add(#offset);
+                #(#limits)*
+                #copy
             }
         }).collect();
         if !staged {

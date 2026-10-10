@@ -147,6 +147,7 @@ fn equal_source_layouts_share_copy_indices_but_keep_separate_bounds() {
     assert_eq!(body.matches("input . len () . saturating_sub").count(), 2);
     assert_eq!(body.matches("other . len () . saturating_sub").count(), 2);
     assert_eq!(body.matches("cp_async_ca_zfill_4").count(), 4);
+    assert!(!body.contains("cp_async_cg"));
     // Only the tile base has overflow checks. The element loop compares the
     // element with the limit of each source.
     for copy in body.split("while __cuda_pipeline_lane").skip(1) {
@@ -156,4 +157,19 @@ fn equal_source_layouts_share_copy_indices_but_keep_separate_bounds() {
         assert!(!element.contains("write"));
         assert_eq!(element.matches("__cuda_pipeline_src <").count(), 2);
     }
+}
+
+#[test]
+fn aligned_row_major_tiles_copy_16_bytes() {
+    let pipeline = prepare_pipeline(&mut valid()).unwrap().unwrap();
+    let staged = pipeline.body(true);
+    let body = quote::quote!(#staged).to_string();
+    assert_eq!(body.matches("while __cuda_pipeline_lane").count(), 4);
+    assert_eq!(body.matches("cp_async_cg_zfill_16").count(), 2);
+    assert_eq!(body.matches("cp_async_ca_zfill_4").count(), 2);
+    assert_eq!(
+        body.matches("__cuda_pipeline_tile_0 . addr () % 16 == 0")
+            .count(),
+        2
+    );
 }

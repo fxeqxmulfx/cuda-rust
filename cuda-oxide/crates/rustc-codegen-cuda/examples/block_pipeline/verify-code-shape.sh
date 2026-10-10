@@ -5,7 +5,8 @@
 # The runtime check passes also when the staged copy is slow. The copy loop
 # must check the overflow one time for each tile, not for each element. The
 # copy fills the elements out of bounds with zero, so the pipeline kernels have
-# no shared stores.
+# no shared stores. Row-major tiles with 16-byte rows and strides must also
+# have a 16-byte copy.
 
 set -euo pipefail
 
@@ -58,6 +59,30 @@ if [[ -n "${checked}" ]]; then
 fi
 if grep -E '[[:space:]]st\.shared\.' "${ptx}" >/dev/null; then
     echo "error: shared store in ${ptx}" >&2
+    exit 1
+fi
+
+# Of the `sum` kernels, D = 32 and D = 128 have 16-byte rows. The XOR layout
+# of `swizzled` moves single elements.
+vector_entries() {
+    awk -v kernel="$1" '
+        /^\.visible \.entry / { entry = $3 }
+        index(entry, kernel "_TID_") == 1 && /cp[.]async[.]cg[.]shared[.]global .*, 16,/ {
+            found[entry] = 1
+        }
+        END {
+            count = 0
+            for (key in found) count++
+            print count
+        }
+    ' "${ptx}"
+}
+if [[ "$(vector_entries sum)" != 2 ]]; then
+    echo "error: expected a 16-byte copy in 2 sum kernels of ${ptx}" >&2
+    exit 1
+fi
+if [[ "$(vector_entries swizzled)" != 0 ]]; then
+    echo "error: 16-byte copy in a swizzled kernel of ${ptx}" >&2
     exit 1
 fi
 

@@ -237,8 +237,7 @@ fn launch_on_gpu() {
     const COUNT: u32 = 11;
     let context = CudaContext::new(0).expect("create CUDA context");
     let stream = context.default_stream();
-    // SAFETY: cargo-oxide built the embedded artifact from this cuda_module.
-    let module = unsafe { kernels::load(&context) }.expect("load policy_config module");
+    let module = kernels::load(&context).expect("load policy_config module");
     let input = DeviceBuffer::<u32>::zeroed(&stream, 4096).expect("allocate input");
     let small_output = DeviceBuffer::<u32>::zeroed(&stream, 1024).expect("allocate small output");
     let wide_output = DeviceBuffer::<u32>::zeroed(&stream, 4096).expect("allocate wide output");

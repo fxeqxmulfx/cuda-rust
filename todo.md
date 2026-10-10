@@ -62,7 +62,7 @@ after each device fix.
   `checked_mul` and `checked_add` for each access. In the staged pipeline, LLVM
   removes them, but views with a runtime offset or stride keep them. Check the
   limits one time in `BlockTile::new`.
-- [ ] Host, one time for each module load:
+- [x] Host, one time for each module load:
   [`EditScript::replace`](cuda-oxide/crates/ptx-parse/src/edit.rs) finds
   overlaps with a linear search, so a merge is O(n²) in the number of edits.
   Keep the edits sorted and use a binary search.

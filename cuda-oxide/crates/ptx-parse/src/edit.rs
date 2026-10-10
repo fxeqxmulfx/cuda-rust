@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
 
@@ -40,13 +41,8 @@ pub struct AppliedEdits {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EditScript {
-    edits: Vec<Edit>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Edit {
-    range: Range<usize>,
-    replacement: String,
+    /// The replacement of each source range, by `(start, end)`.
+    edits: BTreeMap<(usize, usize), String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,20 +118,24 @@ impl EditScript {
         if range.start > range.end {
             return Err(EditError::InvalidRange { range });
         }
-        if let Some(existing) = self
-            .edits
-            .iter()
-            .find(|edit| ranges_conflict(&edit.range, &range))
+        // No two edits conflict, thus each edit ends at or before the start
+        // of the next edit. Then only the edits next to `range` can conflict
+        // with it.
+        let key = (range.start, range.end);
+        let before = self.edits.range(..key).next_back();
+        let after = self.edits.range(key..).next();
+        if let Some(&(start, end)) = before
+            .into_iter()
+            .chain(after)
+            .map(|(key, _)| key)
+            .find(|&&(start, end)| ranges_conflict(&(start..end), &range))
         {
             return Err(EditError::Overlap {
-                first: existing.range.clone(),
+                first: start..end,
                 second: range,
             });
         }
-        self.edits.push(Edit {
-            range,
-            replacement: replacement.into(),
-        });
+        self.edits.insert(key, replacement.into());
         Ok(())
     }
 
@@ -146,44 +146,39 @@ impl EditScript {
     /// Apply all edits and retain a bidirectional map between the input and
     /// output byte coordinate spaces.
     pub fn apply_with_map(&self, source: &str) -> Result<AppliedEdits, EditError> {
-        let mut edits: Vec<&Edit> = self.edits.iter().collect();
-        edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
-
-        for edit in &edits {
-            if edit.range.end > source.len() {
+        for &(start, end) in self.edits.keys() {
+            if end > source.len() {
                 return Err(EditError::OutOfBounds {
-                    range: edit.range.clone(),
+                    range: start..end,
                     source_len: source.len(),
                 });
             }
-            for offset in [edit.range.start, edit.range.end] {
+            for offset in [start, end] {
                 if !source.is_char_boundary(offset) {
                     return Err(EditError::NonCharacterBoundary { offset });
                 }
             }
         }
 
-        let replacement_bytes = edits
-            .iter()
-            .map(|edit| edit.replacement.len())
-            .sum::<usize>();
-        let removed_bytes = edits
-            .iter()
-            .map(|edit| edit.range.end - edit.range.start)
+        let replacement_bytes = self.edits.values().map(String::len).sum::<usize>();
+        let removed_bytes = self
+            .edits
+            .keys()
+            .map(|&(start, end)| end - start)
             .sum::<usize>();
         let mut output = String::with_capacity(source.len() + replacement_bytes - removed_bytes);
-        let mut mapped_edits = Vec::with_capacity(edits.len());
+        let mut mapped_edits = Vec::with_capacity(self.edits.len());
         let mut cursor = 0usize;
-        for edit in edits {
-            output.push_str(&source[cursor..edit.range.start]);
+        for (&(start, end), replacement) in &self.edits {
+            output.push_str(&source[cursor..start]);
             let output_start = output.len();
-            output.push_str(&edit.replacement);
+            output.push_str(replacement);
             let output_end = output.len();
             mapped_edits.push(MappedEdit {
-                original: edit.range.clone(),
+                original: start..end,
                 output: output_start..output_end,
             });
-            cursor = edit.range.end;
+            cursor = end;
         }
         output.push_str(&source[cursor..]);
         let output_len = output.len();
@@ -333,6 +328,32 @@ mod tests {
             duplicate_insert.insert(1, "y"),
             Err(EditError::Overlap { .. })
         ));
+    }
+
+    #[test]
+    fn conflicts_match_a_check_of_all_edits() {
+        // A xorshift generator gives the same edits for each run.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound) as usize
+        };
+        for _ in 0..500 {
+            let mut edits = EditScript::new();
+            let mut accepted: Vec<Range<usize>> = Vec::new();
+            for _ in 0..30 {
+                let start = next(40);
+                let range = start..start + next(4);
+                let conflict = accepted.iter().any(|edit| ranges_conflict(edit, &range));
+                let result = edits.replace(range.clone(), "x");
+                assert_eq!(result.is_err(), conflict, "{range:?} {accepted:?}");
+                if !conflict {
+                    accepted.push(range);
+                }
+            }
+        }
     }
 
     #[test]

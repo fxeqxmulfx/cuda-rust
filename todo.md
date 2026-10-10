@@ -19,7 +19,7 @@ Make one commit with a test for each fix.
   crate that instantiates a specialization. When the linker keeps them, two
   such libraries with the same specialization give the same entry two times.
   Then the merge gives `ConflictingEntry`.
-- [ ] The `load` of a generic module merges the PTX bundles of all crates in
+- [x] The `load` of a generic module merges the PTX bundles of all crates in
   the image. Thus two crates with a non-generic kernel of the same name give
   `ConflictingEntry`. Also, the driver compiles the PTX of all crates for each
   of these modules. Merge only the bundles that the module needs.

@@ -133,9 +133,9 @@ pub use cuda_async::simt::launch::{
 };
 
 pub use embedded::{
-    EmbeddedModuleError, load_all_ptx_bundles_merged, load_all_ptx_bundles_merged_from_anchor,
-    load_embedded_module, load_embedded_module_from_anchor, load_first_embedded_module,
-    merge_ptx_bundles,
+    EmbeddedModuleError, load_all_ptx_bundles_merged, load_embedded_module,
+    load_embedded_module_from_anchor, load_first_embedded_module, load_ptx_bundles_merged,
+    load_ptx_bundles_merged_from_anchor, merge_ptx_bundles,
 };
 pub use entry_registry::{
     diagnose_generic_kernel_load_error, divergent_type_id_entries, panic_generic_kernel_load_failed,

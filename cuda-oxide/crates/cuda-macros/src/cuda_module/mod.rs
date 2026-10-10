@@ -187,21 +187,50 @@ pub(crate) fn expand_cuda_module_inner(
             ::core::option::Option::None => ::cuda_host::load_embedded_module(ctx, name)?,
         }
     };
-    // The merged load of a generic module reads the same image.
+    // The merged load of a generic module reads the same image. It merges
+    // only the bundles with specializations of the enabled generic kernels
+    // and, for non-generic kernels and constants, the bundle `name`.
+    let named_bundle = if has_typed_embedded_provenance {
+        quote! { ::core::option::Option::None }
+    } else {
+        quote! { ::core::option::Option::Some(name) }
+    };
+    let generic_kernel_names = transformed.kernels.iter().filter_map(|kernel| {
+        if !kernel.is_generic {
+            return None;
+        }
+        let cfg_attrs = &kernel.effective_cfg_attrs;
+        let name = kernel.fn_name.to_string();
+        Some(quote! { #(#cfg_attrs)* #name, })
+    });
+    let generic_kernels = quote! { &[#(#generic_kernel_names)*] };
     let merged_module_loader = quote! {
         match __cuda_oxide_artifact_anchor {
             ::core::option::Option::Some(anchor) => {
                 #[cfg(any(target_os = "linux", target_os = "android"))]
                 {
-                    ::cuda_host::load_all_ptx_bundles_merged_from_anchor(ctx, anchor)?
+                    ::cuda_host::load_ptx_bundles_merged_from_anchor(
+                        ctx,
+                        anchor,
+                        #named_bundle,
+                        #generic_kernels,
+                    )?
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "android")))]
                 {
                     let _ = anchor;
-                    ::cuda_host::load_all_ptx_bundles_merged(ctx)?
+                    ::cuda_host::load_ptx_bundles_merged(
+                        ctx,
+                        #named_bundle,
+                        #generic_kernels,
+                    )?
                 }
             }
-            ::core::option::Option::None => ::cuda_host::load_all_ptx_bundles_merged(ctx)?,
+            ::core::option::Option::None => ::cuda_host::load_ptx_bundles_merged(
+                ctx,
+                #named_bundle,
+                #generic_kernels,
+            )?,
         }
     };
     let module_loader = if has_generic {
@@ -213,7 +242,6 @@ pub(crate) fn expand_cuda_module_inner(
             let mut __cuda_oxide_has_enabled_generic_kernel = false;
             #(#enable_generic_loader_statements)*
             let module = if __cuda_oxide_has_enabled_generic_kernel {
-                let _ = name; // merged load ignores the crate-name hint
                 #merged_module_loader
             } else {
                 #embedded_module_loader
@@ -342,7 +370,12 @@ pub(crate) fn expand_cuda_module_inner(
                 #artifact_anchor_statements
                 let anchor = __cuda_oxide_artifact_anchor
                     .ok_or(::cuda_host::EmbeddedModuleError::NoArtifactAnchor)?;
-                let module = ::cuda_host::load_all_ptx_bundles_merged_from_anchor(ctx, anchor)?;
+                let module = ::cuda_host::load_ptx_bundles_merged_from_anchor(
+                    ctx,
+                    anchor,
+                    ::core::option::Option::None,
+                    #generic_kernels,
+                )?;
                 // SAFETY: only compiler-embedded PTX from the verified mapped
                 // image is selected. Non-generic entries cannot use the specialization namespace, and the
                 // merger rejects duplicate definitions. Each typed launcher's

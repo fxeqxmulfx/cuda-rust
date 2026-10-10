@@ -384,7 +384,7 @@ fn cfg_gated_generic_uses_the_same_gate_for_marker_and_loader() {
         "loader selection must inherit the generic kernel's cfg:\n{expanded}"
     );
     assert!(
-            expanded.contains(&format!("if__cuda_oxide_has_enabled_generic_kernel{{let_=name;{ANCHORED_MERGED_LOADER}}}else{{{ANCHORED_EMBEDDED_LOADER}}}")),
+            expanded.contains(&format!("if__cuda_oxide_has_enabled_generic_kernel{{{ANCHORED_MERGED_LOADER}}}else{{{ANCHORED_EMBEDDED_LOADER}}}")),
             "loader must fall back to the embedded artifact when no generic kernel is enabled:\n{expanded}"
         );
 }
@@ -400,16 +400,20 @@ const ANCHORED_EMBEDDED_LOADER: &str = concat!(
     "}::core::option::Option::None=>::cuda_host::load_embedded_module(ctx,name)?,}",
 );
 
-/// The merged loader of a generic module: merge the PTX bundles of the binary
-/// that maps the artifact anchor, or of the executable when no anchor was
-/// referenced.
+/// The merged loader of a generic module with the cfg-gated generic kernel
+/// `optional`: merge the bundle `name` and the PTX bundles with
+/// specializations of `optional`, of the binary that maps the artifact anchor,
+/// or of the executable when no anchor was referenced.
 const ANCHORED_MERGED_LOADER: &str = concat!(
     "match__cuda_oxide_artifact_anchor{::core::option::Option::Some(anchor)=>{",
     "#[cfg(any(target_os=\"linux\",target_os=\"android\"))]",
-    "{::cuda_host::load_all_ptx_bundles_merged_from_anchor(ctx,anchor)?}",
+    "{::cuda_host::load_ptx_bundles_merged_from_anchor(ctx,anchor,",
+    "::core::option::Option::Some(name),&[#[cfg(feature=\"generic\")]\"optional\",],)?}",
     "#[cfg(not(any(target_os=\"linux\",target_os=\"android\")))]",
-    "{let_=anchor;::cuda_host::load_all_ptx_bundles_merged(ctx)?}",
-    "}::core::option::Option::None=>::cuda_host::load_all_ptx_bundles_merged(ctx)?,}",
+    "{let_=anchor;::cuda_host::load_ptx_bundles_merged(ctx,",
+    "::core::option::Option::Some(name),&[#[cfg(feature=\"generic\")]\"optional\",],)?}",
+    "}::core::option::Option::None=>::cuda_host::load_ptx_bundles_merged(ctx,",
+    "::core::option::Option::Some(name),&[#[cfg(feature=\"generic\")]\"optional\",],)?,}",
 );
 
 #[test]
@@ -805,7 +809,14 @@ fn generic_contracted_module_has_safe_embedded_load_and_unsafe_foreign_binding()
     assert!(!expanded.contains("pubunsafefnload("));
     assert!(expanded.contains("pubunsafefnload_named("));
     assert!(expanded.contains("pubunsafefnfrom_module("));
-    assert!(expanded.contains("::cuda_host::load_all_ptx_bundles_merged_from_anchor(ctx,anchor)?"));
+    assert!(expanded.contains(
+        "::cuda_host::load_ptx_bundles_merged_from_anchor(ctx,anchor,::core::option::Option::None,&[\"map\",],)?"
+    ));
+    // Without non-generic kernels and constants, `load_named` does not merge
+    // the bundle `name`.
+    assert!(expanded.contains(
+        "::cuda_host::load_ptx_bundles_merged(ctx,::core::option::Option::None,&[\"map\",],)?"
+    ));
     #[cfg(feature = "async")]
     {
         assert!(expanded.contains("pubfnload_async("));

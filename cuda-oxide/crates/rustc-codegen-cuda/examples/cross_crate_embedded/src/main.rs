@@ -10,10 +10,10 @@
 //! rather than from a PTX file on disk.
 //!
 //! When `embedded_kernel_lib::kernels::load(&ctx)` is called, the macro-generated
-//! `load` function uses `load_all_ptx_bundles_merged` (because the module
-//! contains generic kernels). This merges all PTX bundles in the process,
-//! including the binary crate's bundle where the monomorphized PTX for
-//! `scale::<f32>` and `scale::<i32>` actually lives.
+//! `load` function uses `load_ptx_bundles_merged_from_anchor` (because the
+//! module contains generic kernels). This merges the PTX bundles with
+//! specializations of `scale`, here the binary crate's bundle where the
+//! monomorphized PTX for `scale::<f32>` and `scale::<i32>` actually lives.
 //!
 //! Before the fix this would panic with:
 //!   DriverError(500, "named symbol not found")

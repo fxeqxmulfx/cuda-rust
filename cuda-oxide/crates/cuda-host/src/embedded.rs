@@ -158,10 +158,31 @@ pub fn load_all_ptx_bundles_merged(
     ctx: &Arc<CudaContext>,
 ) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
     let bundles = artifact_bundles_from_current_exe()?;
-    load_merged_ptx_bundles(ctx, &bundles)
+    let (merged, entries) = merge_ptx_bundles_with_entries(&bundles)?;
+    load_merged_module(ctx, &merged, &entries)
 }
 
-/// Merge compiler-embedded PTX from the original image containing `anchor`.
+/// Merge the PTX bundles of the current executable that a generic module
+/// needs into one CUDA module. These are the bundle `name`, if given and
+/// present, and each bundle that defines a specialization of a kernel in
+/// `generic_kernels`, the base names of the generic kernels of the module.
+/// For each `.extern` function of these bundles, the merge also includes the
+/// first bundle with a `.visible` definition of the function.
+///
+/// Thus the kernels of the other bundles do not cause a conflict, and the
+/// driver does not compile them.
+pub fn load_ptx_bundles_merged(
+    ctx: &Arc<CudaContext>,
+    name: Option<&str>,
+    generic_kernels: &[&str],
+) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
+    let bundles = artifact_bundles_from_current_exe()?;
+    let (merged, entries) = merge_module_ptx_bundles(&bundles, name, generic_kernels)?;
+    load_merged_module(ctx, &merged, &entries)
+}
+
+/// Merge the compiler-embedded PTX bundles that [`load_ptx_bundles_merged`]
+/// selects, from the original image containing `anchor`.
 ///
 /// Typed generic module loaders use their compiler-owned anchor, retaining
 /// library specializations and checking the mapped file's identity before
@@ -170,27 +191,29 @@ pub fn load_all_ptx_bundles_merged(
 /// requires readable Linux or Android procfs; unsupported or unavailable
 /// provenance fails loading instead of falling back to another binary.
 #[doc(hidden)]
-pub fn load_all_ptx_bundles_merged_from_anchor(
+pub fn load_ptx_bundles_merged_from_anchor(
     ctx: &Arc<CudaContext>,
     anchor: &u8,
+    name: Option<&str>,
+    generic_kernels: &[&str],
 ) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
     let bundles = artifact_bundles_containing(anchor)?;
-    load_merged_ptx_bundles(ctx, &bundles)
+    let (merged, entries) = merge_module_ptx_bundles(&bundles, name, generic_kernels)?;
+    load_merged_module(ctx, &merged, &entries)
 }
 
-fn load_merged_ptx_bundles(
+fn load_merged_module(
     ctx: &Arc<CudaContext>,
-    bundles: &[OwnedArtifactBundle],
+    merged: &str,
+    entries: &[&str],
 ) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
-    let (merged, entries) = merge_ptx_bundles_with_entries(bundles)?;
-
     let module = ctx.load_module_from_image(merged.as_bytes())?;
     // Retain the merged module's `.entry` names (a few dozen bytes per
     // kernel). If a later `_TID_` generic-kernel lookup misses while a
     // same-base entry exists under a different hash, the launch paths can
     // then report a host/device type-identity naming divergence instead of an
     // opaque "named symbol not found". See `crate::entry_registry`.
-    crate::entry_registry::register_merged_module_entries(&module, &entries);
+    crate::entry_registry::register_merged_module_entries(&module, entries);
     Ok(module)
 }
 
@@ -222,6 +245,76 @@ pub fn merge_ptx_bundles<'a>(
 pub(crate) fn merge_ptx_bundles_with_entries<'a>(
     bundles: impl IntoIterator<Item = &'a OwnedArtifactBundle>,
 ) -> Result<(String, Vec<&'a str>), EmbeddedModuleError> {
+    merge_ptx_documents(&parse_ptx_bundles(bundles)?)
+}
+
+/// Merge the bundles that [`load_ptx_bundles_merged`] selects, as
+/// [`merge_ptx_bundles_with_entries`] does.
+fn merge_module_ptx_bundles<'a>(
+    bundles: impl IntoIterator<Item = &'a OwnedArtifactBundle>,
+    name: Option<&str>,
+    generic_kernels: &[&str],
+) -> Result<(String, Vec<&'a str>), EmbeddedModuleError> {
+    let documents = parse_ptx_bundles(bundles)?;
+    merge_ptx_documents(&module_documents(documents, name, generic_kernels))
+}
+
+/// The documents of the bundles that [`load_ptx_bundles_merged`] selects, in
+/// bundle order.
+fn module_documents<'source>(
+    documents: Vec<(&'source str, ptx_parse::Document<'source>)>,
+    name: Option<&str>,
+    generic_kernels: &[&str],
+) -> Vec<(&'source str, ptx_parse::Document<'source>)> {
+    let mut selected = vec![false; documents.len()];
+    let mut definitions = HashMap::new();
+    for (index, (bundle, document)) in documents.iter().enumerate() {
+        selected[index] = Some(*bundle) == name;
+        for callable in document.callables() {
+            let defined = callable.definition_scope().is_some();
+            match callable.kind() {
+                ptx_parse::CallableKind::Function
+                    if defined && callable.text().starts_with(".visible") =>
+                {
+                    definitions.entry(callable.name()).or_insert(index);
+                }
+                ptx_parse::CallableKind::Entry if defined => {
+                    selected[index] |= crate::entry_registry::split_type_id_name(callable.name())
+                        .is_some_and(|(base, _)| generic_kernels.contains(&base));
+                }
+                _ => {}
+            }
+        }
+    }
+    // The merge links each `.extern` function to its first `.visible`
+    // definition. Select the bundle of this definition.
+    let mut pending: Vec<_> = (0..documents.len())
+        .filter(|&index| selected[index])
+        .collect();
+    while let Some(index) = pending.pop() {
+        for callable in documents[index].1.callables() {
+            if callable.kind() == ptx_parse::CallableKind::Function
+                && callable.definition_scope().is_none()
+                && callable.is_extern()
+                && let Some(&definition) = definitions.get(callable.name())
+                && !selected[definition]
+            {
+                selected[definition] = true;
+                pending.push(definition);
+            }
+        }
+    }
+    documents
+        .into_iter()
+        .zip(selected)
+        .filter_map(|(document, selected)| selected.then_some(document))
+        .collect()
+}
+
+/// The PTX documents of the bundles with a PTX payload, in bundle order.
+fn parse_ptx_bundles<'a>(
+    bundles: impl IntoIterator<Item = &'a OwnedArtifactBundle>,
+) -> Result<Vec<(&'a str, ptx_parse::Document<'a>)>, EmbeddedModuleError> {
     let mut documents = Vec::new();
     for bundle in bundles {
         if let Some(bytes) = bundle.payload(ArtifactPayloadKind::Ptx) {
@@ -239,11 +332,18 @@ pub(crate) fn merge_ptx_bundles_with_entries<'a>(
             documents.push((bundle.name.as_str(), document));
         }
     }
+    Ok(documents)
+}
+
+/// Merge the documents as [`merge_ptx_bundles_with_entries`] does.
+fn merge_ptx_documents<'source>(
+    documents: &[(&str, ptx_parse::Document<'source>)],
+) -> Result<(String, Vec<&'source str>), EmbeddedModuleError> {
     if documents.is_empty() {
         return Err(EmbeddedModuleError::NoModules);
     }
 
-    let state = PtxMergeState::new(&documents)?;
+    let state = PtxMergeState::new(documents)?;
     // Later bundles may use instructions introduced after the ISA version or
     // target of the first bundle. One header covers all bundles in every order.
     let mut merged = String::new();
@@ -946,6 +1046,67 @@ mod tests {
             merge_ptx_bundles_with_entries([&ptx_bundle("broken", "/* unterminated")]),
             Err(EmbeddedModuleError::InvalidPtx { .. })
         ));
+    }
+
+    /// The load of a generic module merges the bundle `name` and the bundles
+    /// with specializations of its generic kernels. Other bundles can define
+    /// kernels with the same names.
+    #[test]
+    fn merges_only_the_bundles_that_a_module_needs() {
+        let header = ".version 8.9\n.target sm_80\n.address_size 64\n";
+        let scale_library = "scale_TID_11111111111111111111111111111111";
+        let copy_unrelated = "copy_TID_22222222222222222222222222222222";
+        let scale_binary = "scale_TID_33333333333333333333333333333333";
+        let bundles = [
+            ptx_bundle(
+                "library",
+                &format!(
+                    "{header}.visible .entry vecadd() {{ ret; }}\n.visible .entry {scale_library}() {{ ret; }}\n"
+                ),
+            ),
+            ptx_bundle(
+                "unrelated",
+                &format!(
+                    "{header}.visible .entry vecadd() {{ ret; }}\n.visible .entry {copy_unrelated}() {{ ret; }}\n"
+                ),
+            ),
+            ptx_bundle(
+                "binary",
+                &format!(
+                    "{header}.extern .func exported();\n.visible .entry {scale_binary}() {{ call exported, (); ret; }}\n"
+                ),
+            ),
+            ptx_bundle(
+                "provider",
+                &format!("{header}.visible .func exported() {{ ret; }}\n"),
+            ),
+        ];
+        assert!(matches!(
+            merge_ptx_bundles(&bundles),
+            Err(EmbeddedModuleError::ConflictingEntry { .. })
+        ));
+
+        let merge =
+            |name, generic_kernels| merge_module_ptx_bundles(&bundles, name, generic_kernels);
+        // The `.extern` function of `binary` adds `provider`.
+        let (merged, entries) = merge(None, &["scale"]).unwrap();
+        assert_eq!(entries, ["vecadd", scale_library, scale_binary]);
+        assert!(merged.contains(".visible .func exported() { ret; }"));
+        assert_eq!(merge(Some("missing"), &["scale"]).unwrap().1, entries);
+        assert_eq!(
+            merge(Some("unrelated"), &[]).unwrap().1,
+            ["vecadd", copy_unrelated]
+        );
+        let (merged, entries) = merge(Some("binary"), &[]).unwrap();
+        assert_eq!(entries, [scale_binary]);
+        assert!(merged.contains(".visible .func exported() { ret; }"));
+        // A kernel name must be equal to the base name of a specialization.
+        for generic_kernels in [&["scal"][..], &["vecadd"], &[]] {
+            assert!(matches!(
+                merge(Some("missing"), generic_kernels),
+                Err(EmbeddedModuleError::NoModules)
+            ));
+        }
     }
 
     #[test]

@@ -19,10 +19,10 @@
 //! producing 32-hex-character names, and every generic launch fails with an
 //! opaque `DriverError(500, "named symbol not found")`.
 //!
-//! To make that failure self-explaining, [`crate::load_all_ptx_bundles_merged`]
-//! retains the `.entry` names that the merge found in the bundles. When a
-//! generic-kernel lookup later misses, the macro-generated launch paths call
-//! [`diagnose_generic_kernel_load_error`] /
+//! To make that failure self-explaining, [`crate::load_ptx_bundles_merged`]
+//! and the other merged loaders retain the `.entry` names that the merge found
+//! in the bundles. When a generic-kernel lookup later misses, the
+//! macro-generated launch paths call [`diagnose_generic_kernel_load_error`] /
 //! [`panic_generic_kernel_load_failed`]: if the module holds the same base
 //! kernel under a *different* `_TID_` hash, the failure is reported as a
 //! host/device type-identity divergence with both names and the remedy,
@@ -125,7 +125,7 @@ pub(crate) fn register_merged_module_entries(module: &Arc<CudaModule>, entries: 
 /// Strict on purpose: the hash suffix must be exactly 32 lowercase hex
 /// characters (the `{:032x}` both naming sides emit), so a kernel whose name
 /// merely contains `_TID_` never triggers a false diagnosis.
-fn split_type_id_name(name: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_type_id_name(name: &str) -> Option<(&str, &str)> {
     let index = name.rfind(TYPE_ID_INFIX)?;
     let base = &name[..index];
     let hash = &name[index + TYPE_ID_INFIX.len()..];
@@ -154,8 +154,8 @@ fn divergent_entries_in(entries: &[String], requested: &str) -> Vec<String> {
 /// name but carry a different `_TID_` type-identity hash.
 ///
 /// Empty when `requested` is not a `_TID_` name, when `module` was not loaded
-/// through [`crate::load_all_ptx_bundles_merged`], or when no same-base entry
-/// exists; i.e. whenever the miss is an ordinary miss.
+/// through a merged loader such as [`crate::load_ptx_bundles_merged`], or when
+/// no same-base entry exists; i.e. whenever the miss is an ordinary miss.
 pub fn divergent_type_id_entries(module: &Arc<CudaModule>, requested: &str) -> Vec<String> {
     match merged_module_entries().entries_for(module) {
         Some(entries) => divergent_entries_in(&entries, requested),

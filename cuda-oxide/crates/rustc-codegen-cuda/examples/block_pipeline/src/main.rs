@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig1D};
-use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread};
 use cuda_device::shared::BlockTile;
+use cuda_device::{DisjointSlice, kernel, launch_bounds, launch_contract, thread};
 use cuda_host::cuda_module;
 
 #[cuda_module]
@@ -18,22 +18,33 @@ mod kernels {
         #[tile_source(columns = D, stride = D, offset = block * 5)] b: &[f32],
         mut out: DisjointSlice<f32, thread::StripedWarp<D>>,
     ) {
-        let init = || { thread::sync_threads(); [0.0; 4] };
-        let step = |state: &mut [f32; 4], _iteration: usize, a: BlockTile<'_, f32>, b: BlockTile<'_, f32>| {
+        let init = || {
+            thread::sync_threads();
+            [0.0; 4]
+        };
+        let step = |state: &mut [f32; 4],
+                    _iteration: usize,
+                    a: BlockTile<'_, f32>,
+                    b: BlockTile<'_, f32>| {
             thread::sync_threads();
             let lane = thread::threadIdx_x() as usize % 32;
-            if lane.is_multiple_of(7) { return; }
+            if lane.is_multiple_of(7) {
+                return;
+            }
             for c in 0..D.div_ceil(32) {
                 for row in 0..4 {
-                    state[c] += a.load(row, lane + c * 32)
-                        + b.load(row, lane + c * 32);
+                    state[c] += a.load(row, lane + c * 32) + b.load(row, lane + c * 32);
                 }
             }
         };
         let mut finish = |state: [f32; 4]| {
             for c in 0..D.div_ceil(32) {
-                if let Some(index) = thread::striped_index::<D>(thread::threadIdx_x() as usize % 32 + c * 32) {
-                    if let Some(value) = out.get_mut(index) { *value = state[c]; }
+                if let Some(index) =
+                    thread::striped_index::<D>(thread::threadIdx_x() as usize % 32 + c * 32)
+                {
+                    if let Some(value) = out.get_mut(index) {
+                        *value = state[c];
+                    }
                 }
             }
         };
@@ -44,12 +55,17 @@ mod kernels {
     #[block_pipeline(rows = R + 1, iterations = passes)]
     pub fn swizzled<const D: usize, const R: usize>(
         passes: usize,
-        #[tile_source(columns = D, stride = D, offset = (block * 3 + 1) / (1 - 1 / (passes + 1)), layout = xor32)] a: &[f32],
-        #[tile_source(columns = D, stride = D, offset = (block * 3 + 1) / (1 - 1 / (passes + 1)))] b: &[f32],
+        #[tile_source(columns = D, stride = D, offset = (block * 3 + 1) / (1 - 1 / (passes + 1)), layout = xor32)]
+        a: &[f32],
+        #[tile_source(columns = D, stride = D, offset = (block * 3 + 1) / (1 - 1 / (passes + 1)))]
+        b: &[f32],
         mut out: DisjointSlice<f32, thread::StripedWarp<D>>,
     ) {
         let init = || [0.0; 4];
-        let step = |state: &mut [f32; 4], _iteration: usize, a: BlockTile<'_, f32>, b: BlockTile<'_, f32>| {
+        let step = |state: &mut [f32; 4],
+                    _iteration: usize,
+                    a: BlockTile<'_, f32>,
+                    b: BlockTile<'_, f32>| {
             let lane = thread::threadIdx_x() as usize % 32;
             for c in 0..D / 32 {
                 for row in 0..R + 1 {
@@ -59,8 +75,12 @@ mod kernels {
         };
         let mut finish = |state: [f32; 4]| {
             for c in 0..D / 32 {
-                if let Some(index) = thread::striped_index::<D>(thread::threadIdx_x() as usize % 32 + c * 32) {
-                    if let Some(value) = out.get_mut(index) { *value = state[c]; }
+                if let Some(index) =
+                    thread::striped_index::<D>(thread::threadIdx_x() as usize % 32 + c * 32)
+                {
+                    if let Some(value) = out.get_mut(index) {
+                        *value = state[c];
+                    }
                 }
             }
         };
@@ -72,12 +92,16 @@ mod kernels {
         for column in 0..D + 13 {
             if let Some(index) = thread::striped_index::<D>(column) {
                 let raw = index.get();
-                if let Some(value) = out.get_mut(index) { *value = (raw + 1) as f32; }
+                if let Some(value) = out.get_mut(index) {
+                    *value = (raw + 1) as f32;
+                }
             }
         }
     }
 }
-fn check<const D: usize>(context: &std::sync::Arc<CudaContext>) -> Result<(), Box<dyn std::error::Error>> {
+fn check<const D: usize>(
+    context: &std::sync::Arc<CudaContext>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let stream = context.new_stream()?;
     let module = kernels::load(context)?;
     for length in [0, 1, 7, 129, 517] {
@@ -101,21 +125,39 @@ fn check<const D: usize>(context: &std::sync::Arc<CudaContext>) -> Result<(), Bo
                             + b.get(block * 5 + row * D + column).copied().unwrap_or(0.0);
                     }
                 }
-                assert_eq!(value, expected, "D={D} len={length} passes={passes} index={i}");
+                assert_eq!(
+                    value, expected,
+                    "D={D} len={length} passes={passes} index={i}"
+                );
             }
-            assert!(module.prepare_sum::<D>(LaunchConfig1D::new(3, 64, bytes)).is_err());
-            if D > 0 { assert!(module.prepare_sum::<D>(LaunchConfig1D::new(3, 128, bytes - 1)).is_err()); }
+            assert!(
+                module
+                    .prepare_sum::<D>(LaunchConfig1D::new(3, 64, bytes))
+                    .is_err()
+            );
+            if D > 0 {
+                assert!(
+                    module
+                        .prepare_sum::<D>(LaunchConfig1D::new(3, 128, bytes - 1))
+                        .is_err()
+                );
+            }
         }
     }
     Ok(())
 }
-fn check_swizzled<const D: usize, const R: usize>(context: &std::sync::Arc<CudaContext>) -> Result<(), Box<dyn std::error::Error>> {
+fn check_swizzled<const D: usize, const R: usize>(
+    context: &std::sync::Arc<CudaContext>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let stream = context.new_stream()?;
     let module = kernels::load(context)?;
     for length in [0, 1, 7, 129, 517, 4099] {
         let input: Vec<f32> = (0..length).map(|i| (i % 37) as f32).collect();
         let device = DeviceBuffer::from_host(&stream, &input)?;
-        let other: Vec<f32> = input[..length / 2].iter().map(|value| -2.0 * value).collect();
+        let other: Vec<f32> = input[..length / 2]
+            .iter()
+            .map(|value| -2.0 * value)
+            .collect();
         let other_device = DeviceBuffer::from_host(&stream, &other)?;
         for passes in [0, 1, 2, 3, 8] {
             let bytes = (2 * (R + 1) * 2 * D * 4) as u32;
@@ -125,10 +167,28 @@ fn check_swizzled<const D: usize, const R: usize>(context: &std::sync::Arc<CudaC
             for (i, actual) in out.to_host_vec(&stream)?.into_iter().enumerate() {
                 let column = i % D;
                 let block = i / D / 4;
-                let expected: f32 = (0..passes * (R + 1)).map(|row| input.get(block * 3 + 1 + row * D + column).copied().unwrap_or(0.0) + other.get(block * 3 + 1 + row * D + column).copied().unwrap_or(0.0)).sum();
-                assert_eq!(actual, expected, "swizzled D={D} R={R} length={length} passes={passes} i={i}");
+                let expected: f32 = (0..passes * (R + 1))
+                    .map(|row| {
+                        input
+                            .get(block * 3 + 1 + row * D + column)
+                            .copied()
+                            .unwrap_or(0.0)
+                            + other
+                                .get(block * 3 + 1 + row * D + column)
+                                .copied()
+                                .unwrap_or(0.0)
+                    })
+                    .sum();
+                assert_eq!(
+                    actual, expected,
+                    "swizzled D={D} R={R} length={length} passes={passes} i={i}"
+                );
             }
-            assert!(module.prepare_swizzled::<D, R>(LaunchConfig1D::new(3, 128, bytes - 1)).is_err());
+            assert!(
+                module
+                    .prepare_swizzled::<D, R>(LaunchConfig1D::new(3, 128, bytes - 1))
+                    .is_err()
+            );
         }
     }
     Ok(())
@@ -154,7 +214,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (i, actual) in out.to_host_vec(&stream)?.into_iter().enumerate() {
             let warp = i / 65 % threads.div_ceil(32) as usize;
             let lane = i % 65 % 32;
-            let expected = if warp * 32 + lane < threads as usize { (i + 1) as f32 } else { 0.0 };
+            let expected = if warp * 32 + lane < threads as usize {
+                (i + 1) as f32
+            } else {
+                0.0
+            };
             assert_eq!(actual, expected, "threads={threads} i={i}");
         }
     }

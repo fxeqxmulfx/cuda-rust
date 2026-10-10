@@ -184,8 +184,8 @@ fn load_merged_ptx_bundles(
 }
 
 /// Merge the PTX payloads of `bundles`, in iteration order, into one PTX
-/// module string: the first PTX bundle keeps its `.version` / `.target` /
-/// `.address_size` header directives, every later one contributes its body
+/// module string: the first PTX bundle keeps its `.target` / `.address_size`
+/// headers, the highest `.version` is retained, and later bundles contribute bodies
 /// with those directives stripped. Bundles without a PTX payload are skipped.
 ///
 /// This is the pure half of [`load_all_ptx_bundles_merged`], exposed so tests
@@ -201,6 +201,7 @@ pub fn merge_ptx_bundles<'a>(
 ) -> Result<String, EmbeddedModuleError> {
     let mut sources = Vec::new();
     let mut state = PtxMergeState::default();
+    let mut version = (0u32, 0u32);
     for bundle in bundles {
         if let Some(bytes) = bundle.payload(ArtifactPayloadKind::Ptx) {
             let source = std::str::from_utf8(bytes)
@@ -214,6 +215,24 @@ pub fn merge_ptx_bundles<'a>(
                     reason: error.to_string(),
                 }
             })?;
+            for directive in document
+                .directives()
+                .iter()
+                .filter(|d| d.name() == ".version")
+            {
+                let value = directive
+                    .arguments()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                let parsed = value.split_once('.').and_then(|(major, minor)| {
+                    Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?))
+                });
+                version = version.max(parsed.ok_or_else(|| EmbeddedModuleError::InvalidPtx {
+                    name: bundle.name.clone(),
+                    reason: "invalid PTX version directive".into(),
+                })?);
+            }
             // Explicit device externs keep their link names across bundles.
             // Every other helper belongs to the artifact that compiled it.
             for callable in document.callables() {
@@ -239,6 +258,29 @@ pub fn merge_ptx_bundles<'a>(
         if !body.ends_with('\n') {
             merged.push('\n');
         }
+    }
+    // Later bundles may use instructions introduced after the first bundle's
+    // ISA version. Keep their minimum version requirement in every merge order.
+    let document = ptx_parse::Document::parse(&merged).expect("validated PTX bodies");
+    if let Some(directive) = document
+        .directives()
+        .iter()
+        .find(|d| d.name() == ".version")
+    {
+        let span = directive.arguments_span();
+        let token = directive
+            .arguments()
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        let mut edits = ptx_parse::EditScript::new();
+        edits
+            .replace(
+                span.start..span.start + token.len(),
+                format!("{}.{}", version.0, version.1),
+            )
+            .expect("single header edit");
+        merged = edits.apply(&merged).expect("single header edit");
     }
     Ok(merged)
 }
@@ -518,6 +560,23 @@ mod tests {
                 bytes: ptx.as_bytes().to_vec(),
             }],
             entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn retains_the_highest_isa_version_in_either_bundle_order() {
+        let first = ptx_bundle(
+            "first",
+            ".version 7.1 // old header\n.target sm_86\n.address_size 64\n.visible .entry first() { ret; }\n",
+        );
+        let second = ptx_bundle(
+            "second",
+            ".version 7.3\n.target sm_86\n.address_size 64\n.visible .entry second() { ret; }\n",
+        );
+        for bundles in [[&first, &second], [&second, &first]] {
+            let merged = merge_ptx_bundles(bundles).unwrap();
+            assert_eq!(merged.matches(".version").count(), 1);
+            assert!(merged.contains(".version 7.3"));
         }
     }
 

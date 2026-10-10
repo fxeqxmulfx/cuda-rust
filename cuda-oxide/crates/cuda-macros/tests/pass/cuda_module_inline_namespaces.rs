@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#![feature(proc_macro_hygiene)]
 #![allow(dead_code)]
 
 use cuda_core::CudaStream;

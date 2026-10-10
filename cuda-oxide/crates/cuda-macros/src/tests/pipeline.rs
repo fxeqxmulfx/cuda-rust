@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use crate::kernel::{codegen::generic_kernel_no_instantiation_tokens, pipeline::prepare_pipeline};
+use reserved_oxide_symbols::KERNEL_PREFIX;
 use syn::parse_quote;
 
 fn valid() -> syn::ItemFn {
@@ -33,7 +34,7 @@ fn repeated_tiles_are_entry_only_and_complete_before_borrowing() {
     assert!(!helper.contains("cp_async"));
     let entry = functions
         .iter()
-        .find(|f| f.sig.ident.to_string().contains("cuda_oxide_kernel_"))
+        .find(|f| f.sig.ident.to_string().starts_with(KERNEL_PREFIX))
         .unwrap();
     assert!(matches!(entry.sig.safety, syn::Safety::Unsafe(_)));
     let body = quote::quote!(#entry).to_string();

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::kernel::{codegen::generic_kernel_no_instantiation_tokens, shared::take_block_shared};
+use reserved_oxide_symbols::KERNEL_PREFIX;
 use syn::parse_quote;
 
 #[test]
@@ -29,7 +30,7 @@ fn shared_staging_lives_only_in_the_unsafe_entry() {
     );
     let entry = functions
         .iter()
-        .find(|f| f.sig.ident.to_string().contains("cuda_oxide_kernel_"))
+        .find(|f| f.sig.ident.to_string().starts_with(KERNEL_PREFIX))
         .unwrap();
     assert!(matches!(entry.sig.safety, syn::Safety::Unsafe(_)));
     let body = quote::quote!(#entry).to_string();

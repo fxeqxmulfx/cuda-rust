@@ -155,7 +155,7 @@ control flow are rejected. Scalar arguments are uniform within a CUDA block.
 An offset beyond the source produces an empty tile; tails produce shorter
 slices. The host launcher still receives the complete original device buffer.
 
-The generated entry initializes every shared element through disjoint raw
+The generated entry initializes every readable element through disjoint raw
 pointers, then all threads synchronize unconditionally. User code receives
 only an immutable slice borrowed from a local lifetime guard. Explicit
 lifetimes and mutable slice parameters are rejected. Early returns after

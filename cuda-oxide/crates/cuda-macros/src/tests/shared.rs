@@ -84,3 +84,39 @@ fn shared_offsets_remap_uniform_scalars_and_reject_user_control_flow() {
         assert!(take_block_shared(&mut input).is_err());
     }
 }
+
+#[test]
+fn shared_staging_uses_checked_block_sizes_and_only_initializes_live_elements() {
+    for (contract, constant_stride) in [
+        (quote::quote!(domain = 1, block = (128, 1, 1)), true),
+        (quote::quote!(domain = 1), false),
+    ] {
+        let mut input = syn::parse2(quote::quote! {
+            #[launch_contract(#contract)]
+            fn tile(#[block_shared(512)] input: &[f32]) {}
+        })
+        .unwrap();
+        let tile = take_block_shared(&mut input).unwrap().unwrap();
+        let source = parse_quote!(input);
+        let (prefix, _) = tile.prologue(&source, None);
+        let block: syn::Block = syn::parse2(quote::quote! { { #prefix } }).unwrap();
+        let loop_ = block
+            .stmts
+            .iter()
+            .find_map(|stmt| match stmt {
+                syn::Stmt::Expr(syn::Expr::While(expr), _) => Some(expr),
+                _ => None,
+            })
+            .unwrap();
+        let condition = &loop_.cond;
+        assert!(
+            quote::quote!(#condition)
+                .to_string()
+                .contains("shared_length")
+        );
+        assert!(!quote::quote!(#loop_).to_string().contains("else"));
+        let prefix = prefix.to_string();
+        assert_eq!(!prefix.contains("blockDim_x"), constant_stride);
+        assert_eq!(prefix.matches("sync_threads").count(), 1);
+    }
+}

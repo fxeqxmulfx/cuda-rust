@@ -443,7 +443,7 @@ pub fn cuda_module(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `offset = expr` supports integer arithmetic on `block`, `usize` scalar
 /// arguments, and `usize` const parameters. User calls and control flow are
 /// rejected. Short tails and out-of-range offsets yield shorter or empty
-/// slices. The generated entry initializes all storage and synchronizes
+/// slices. The generated entry initializes the readable extent and synchronizes
 /// before making a slice borrowed from a local guard. Direct entry calls
 /// require `unsafe`; prepared host launchers remain safe. Explicit slice
 /// lifetimes, mutable slices, unchecked indexing, and legacy explicit

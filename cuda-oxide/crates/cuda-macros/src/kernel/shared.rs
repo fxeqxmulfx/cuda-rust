@@ -15,6 +15,7 @@ pub(crate) struct BlockShared {
     pub(crate) index: usize,
     pub(crate) name: Ident,
     capacity: usize,
+    block_threads: Option<u32>,
     element: Type,
     offset: Option<Expr>,
     offset_parameters: Vec<(String, usize)>,
@@ -148,6 +149,7 @@ pub(crate) fn take_block_shared(input: &mut ItemFn) -> syn::Result<Option<BlockS
                 index,
                 name: pattern.ident.clone(),
                 capacity,
+                block_threads: None,
                 element: (*slice.elem).clone(),
                 offset,
                 offset_parameters: Vec::new(),
@@ -218,12 +220,16 @@ pub(crate) fn take_block_shared(input: &mut ItemFn) -> syn::Result<Option<BlockS
                     "#[block_shared] requires #[launch_contract(domain = 1, ...)] below #[kernel]",
                 )
             })?;
-        if contract.parse_args::<LaunchContractArgs>()?.domain != 1 {
+        let contract_args = contract.parse_args::<LaunchContractArgs>()?;
+        if contract_args.domain != 1 {
             return Err(syn::Error::new_spanned(
                 contract,
                 "#[block_shared] requires a one-dimensional launch contract",
             ));
         }
+        tile.block_threads = contract_args
+            .exact_block
+            .and_then(|(x, y, z)| (y == 1 && z == 1).then_some(x));
         if input.sig.constness.is_some() {
             return Err(syn::Error::new_spanned(
                 &input.sig,
@@ -251,7 +257,10 @@ impl BlockShared {
         let length = internal_ident("__cuda_oxide_shared_length");
         let lane = internal_ident("__cuda_oxide_shared_lane");
         let step = internal_ident("__cuda_oxide_shared_step");
-        let value = internal_ident("__cuda_oxide_shared_value");
+        let block_threads = match self.block_threads {
+            Some(threads) => quote! { #threads as ::core::primitive::usize },
+            None => quote! { ::cuda_device::thread::blockDim_x() as ::core::primitive::usize },
+        };
         let mut offset = self
             .offset
             .clone()
@@ -302,17 +311,18 @@ impl BlockShared {
             let #pointer = unsafe { ::cuda_device::SharedArray::as_raw_mut_ptr(&raw mut #storage) };
             let #base: ::core::primitive::usize = #offset;
             let #length = #source.len().saturating_sub(#base).min(#capacity);
-            let #step = ::cuda_device::thread::blockDim_x() as ::core::primitive::usize;
+            // Exact launch contracts make the stride a compile-time constant.
+            let #step = #block_threads;
             let mut #lane = ::cuda_device::thread::threadIdx_x() as ::core::primitive::usize;
-            while #lane < #capacity {
-                let #value = if #lane < #length { #source[#base + #lane] } else { 0 as #element };
-                // SAFETY: each lane owns a disjoint sequence in 0..capacity.
-                unsafe { #pointer.add(#lane).write(#value); }
+            while #lane < #length {
+                // SAFETY: each lane owns a disjoint sequence in 0..length.
+                // Unused capacity is never exposed through the borrowed slice.
+                unsafe { #pointer.add(#lane).write(#source[#base + #lane]); }
                 #lane += #step;
             }
             // Every launched thread reaches this barrier before any user code.
             ::cuda_device::thread::sync_threads();
-            // SAFETY: the whole allocation was initialized before the barrier,
+            // SAFETY: the readable extent was initialized before the barrier,
             // remains immutable, and is borrowed only through this local guard.
             let #guard = unsafe { ::cuda_device::shared::__ReadOnlyTile::from_initialized(#pointer, #length) };
         };

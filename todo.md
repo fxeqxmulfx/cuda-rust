@@ -25,7 +25,7 @@ Make one commit with a test for each fix.
   `wgmma_mma_bf16`. IKET and the WGMMA accumulator fusion need the MIR
   preparation that full debug skips, thus the backend refuses these kernels.
   The census does not expect these refusals. `main` has the same failures.
-- [ ] In full debug, `packed_aggregate_abi` does not compile: "storing a packed
+- [x] In full debug, `packed_aggregate_abi` does not compile: "storing a packed
   aggregate containing a shared-memory pointer by value is target-mode
   dependent and is not yet supported". `main` has the same failure.
 - [x] In full debug, `warp_sums` and `partial_warp_reduce` do not compile. The

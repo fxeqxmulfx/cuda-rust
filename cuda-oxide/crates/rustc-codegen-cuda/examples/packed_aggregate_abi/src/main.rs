@@ -264,8 +264,7 @@ mod kernels {
         });
 
         // The returned packed value contains two direct AS3 leaves. Keep it in
-        // SSA and pass it whole into another device helper; recursive/multi-leaf
-        // carrier-local projection support remains deliberately out of scope.
+        // SSA and pass it whole into another device helper.
         unsafe { consume_packed_shared_pair(value, left, right, out) };
     }
 
@@ -287,8 +286,8 @@ mod kernels {
         });
 
         // The AS3 leaves live under a nested aggregate. Keep the packed outer
-        // value in SSA so this still exercises only the internal ABI carrier
-        // generalization, not recursive packed local storage.
+        // value in SSA so this exercises the internal ABI carrier
+        // generalization.
         unsafe { consume_packed_nested_shared(value, left, right, out) };
     }
 
@@ -311,7 +310,7 @@ mod kernels {
 
         // The two AS3 leaves live inside one fixed array. Keep the packed value
         // in SSA so the return boundary rebuilds the bounded target-stable
-        // carrier without widening the narrow local-storage lane.
+        // carrier.
         unsafe { consume_packed_shared_array(value, left, right, out) };
     }
 

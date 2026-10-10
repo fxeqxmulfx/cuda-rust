@@ -18,19 +18,14 @@
 //! unmodelled operation, preparation fails before any MIR operation is lowered.
 
 use crate::convert::target_stable_storage::{StorageRewriteOptions, target_stable_storage_type};
-use crate::convert::types::{
-    PackedSharedInternalAbiInfo, StructLayoutInfo, build_struct_slot_map, convert_type,
-    is_zero_sized_type, packed_shared_internal_abi_info,
-};
+use crate::convert::types::{convert_type, packed_shared_internal_abi_info};
 use dialect_mir::ops::{
     MirAllocaOp, MirArrayElementAddrOp, MirAssertOp, MirCallOp, MirCastOp, MirCondBranchOp,
     MirDbgValueListOp, MirDbgValueOp, MirFieldAddrOp, MirGotoOp, MirLoadOp, MirPtrOffsetOp,
     MirReturnOp, MirStoreOp,
 };
-use dialect_mir::types::{MirPtrType, MirStructType};
-use llvm_export::types as llvm_types;
+use dialect_mir::types::MirPtrType;
 use pliron::builtin::attributes::TypeAttr;
-use pliron::builtin::types::{FP32Type, FP64Type, IntegerType};
 use pliron::context::{Context, Ptr};
 use pliron::identifier::Identifier;
 use pliron::linked_list::ContainsLinkedList;
@@ -135,54 +130,6 @@ fn reject_preexisting_carrier_facts(ctx: &Context, operations: &[Ptr<Operation>]
     Ok(())
 }
 
-/// Recognize exactly the narrow local-storage shape required by #1036.
-///
-/// The internal device ABI is intentionally broader today. Local storage does
-/// not inherit that widening: the root must be a packed struct with exactly one
-/// direct AS3 pointer field and all other non-ZST fields scalar. Nested
-/// aggregates, arrays, vectors, and multiple shared-pointer leaves remain
-/// outside this lane even when the internal ABI can carry them.
-fn packed_shared_local_storage_info(
-    ctx: &mut Context,
-    mir_ty: TypeHandle,
-) -> std::result::Result<Option<PackedSharedInternalAbiInfo>, anyhow::Error> {
-    let layout = {
-        let ty_ref = mir_ty.deref(ctx);
-        let Some(struct_ty) = ty_ref.downcast_ref::<MirStructType>() else {
-            return Ok(None);
-        };
-        StructLayoutInfo::of_struct(struct_ty)
-    };
-
-    let map = build_struct_slot_map(ctx, &layout)?;
-    let mut direct_shared_pointers = 0_u64;
-    for field_ty in &map.field_llvm_types {
-        if is_zero_sized_type(ctx, *field_ty) {
-            continue;
-        }
-        let field_ref = field_ty.deref(ctx);
-        if let Some(pointer) = field_ref.downcast_ref::<llvm_types::PointerType>() {
-            if pointer.address_space() == llvm_types::address_space::SHARED {
-                direct_shared_pointers += 1;
-            }
-            continue;
-        }
-        if field_ref.is::<IntegerType>()
-            || field_ref.is::<llvm_types::HalfType>()
-            || field_ref.is::<FP32Type>()
-            || field_ref.is::<FP64Type>()
-        {
-            continue;
-        }
-        return Ok(None);
-    }
-    if direct_shared_pointers != 1 {
-        return Ok(None);
-    }
-
-    packed_shared_internal_abi_info(ctx, mir_ty)
-}
-
 fn target_stable_local_value_type(
     ctx: &mut Context,
     semantic_mir_ty: TypeHandle,
@@ -219,7 +166,9 @@ fn seed_carrier_allocas(
             };
             pointer.pointee
         };
-        let Some(info) = packed_shared_local_storage_info(ctx, pointee)
+        // Local storage accepts the same packed-AS3 shapes as the internal
+        // device ABI.
+        let Some(info) = packed_shared_internal_abi_info(ctx, pointee)
             .map_err(|error| pliron::input_error_noloc!("{error}"))?
         else {
             continue;
@@ -421,14 +370,16 @@ pub(crate) fn prepare_packed_shared_local_storage(
 mod tests {
     use super::*;
     use crate::convert::ops::test_util::*;
+    use crate::convert::types::llvm_type_contains_pointer_in_address_space;
     use dialect_mir::attributes::MirCastKindAttr;
     use dialect_mir::ops as mir;
+    use dialect_mir::types::{MirArrayType, MirStructType};
     use llvm_export::op_interfaces::PointerTypeResult;
     use llvm_export::ops as llvm;
     use llvm_export::types::{PointerType, StructType, address_space as llvm_addr};
     use pliron::basic_block::BasicBlock;
     use pliron::builtin::attributes::StringAttr;
-    use pliron::builtin::types::{FunctionType, Signedness};
+    use pliron::builtin::types::{FunctionType, IntegerType, Signedness};
     use pliron::op::Op;
 
     fn packed_shared_fixture(ctx: &mut Context) -> (TypeHandle, TypeHandle, TypeHandle) {
@@ -453,6 +404,58 @@ mod tests {
         )
         .into();
         (packed, tag, shared)
+    }
+
+    /// Packed structs with two shared-pointer leaves in field 1 or after it:
+    /// direct pointers, a nested struct, and an array.
+    fn multi_leaf_fixtures(ctx: &mut Context) -> [TypeHandle; 3] {
+        let (_, tag, shared) = packed_shared_fixture(ctx);
+        let pair: TypeHandle = MirStructType::get_with_full_layout(
+            ctx,
+            "PackedSharedPair".into(),
+            vec!["tag".into(), "left".into(), "right".into()],
+            vec![tag, shared, shared],
+            vec![0, 1, 2],
+            vec![0, 1, 9],
+            17,
+            1,
+        )
+        .into();
+        let inner: TypeHandle = MirStructType::get_with_full_layout(
+            ctx,
+            "SharedPair".into(),
+            vec!["left".into(), "right".into()],
+            vec![shared, shared],
+            vec![0, 1],
+            vec![0, 8],
+            16,
+            8,
+        )
+        .into();
+        let nested: TypeHandle = MirStructType::get_with_full_layout(
+            ctx,
+            "PackedNestedShared".into(),
+            vec!["tag".into(), "pair".into()],
+            vec![tag, inner],
+            vec![0, 1],
+            vec![0, 1],
+            17,
+            1,
+        )
+        .into();
+        let array: TypeHandle = MirArrayType::get(ctx, shared, 2).into();
+        let packed_array: TypeHandle = MirStructType::get_with_full_layout(
+            ctx,
+            "PackedSharedArray".into(),
+            vec!["tag".into(), "ptrs".into()],
+            vec![tag, array],
+            vec![0, 1],
+            vec![0, 1],
+            17,
+            1,
+        )
+        .into();
+        [pair, nested, packed_array]
     }
 
     fn append_alloca(ctx: &mut Context, block: Ptr<BasicBlock>, pointee: TypeHandle) -> Value {
@@ -629,6 +632,110 @@ mod tests {
                 (llvm_addr::SHARED, llvm_addr::GENERIC),
             ]
         );
+    }
+
+    /// Full debug keeps each local in memory, also a packed value with more
+    /// than one shared pointer. The slot, the whole-value accesses, and a
+    /// direct field projection must use only generic pointers.
+    #[test]
+    fn multi_leaf_locals_use_carrier_storage() {
+        for index in 0..3 {
+            let mut ctx = make_ctx();
+            let packed = multi_leaf_fixtures(&mut ctx)[index];
+            let field = packed
+                .deref(&ctx)
+                .downcast_ref::<MirStructType>()
+                .unwrap()
+                .field_types[1];
+            let (module, block) = build_kernel(&mut ctx, vec![], vec![]);
+            let slot = append_alloca(&mut ctx, block, packed);
+            let copy_slot = append_alloca(&mut ctx, block, packed);
+            let undef = mir::MirUndefOp::new(&mut ctx, packed);
+            undef.get_operation().insert_at_back(block, &ctx);
+            let value = undef.get_operation().deref(&ctx).get_result(0);
+            let store = Operation::new(
+                &mut ctx,
+                mir::MirStoreOp::get_concrete_op_info(),
+                vec![],
+                vec![slot, value],
+                vec![],
+                0,
+            );
+            store.insert_at_back(block, &ctx);
+            let load = Operation::new(
+                &mut ctx,
+                mir::MirLoadOp::get_concrete_op_info(),
+                vec![packed],
+                vec![slot],
+                vec![],
+                0,
+            );
+            load.insert_at_back(block, &ctx);
+            let loaded = load.deref(&ctx).get_result(0);
+            let copy_store = Operation::new(
+                &mut ctx,
+                mir::MirStoreOp::get_concrete_op_info(),
+                vec![],
+                vec![copy_slot, loaded],
+                vec![],
+                0,
+            );
+            copy_store.insert_at_back(block, &ctx);
+
+            let field_ptr_ty: TypeHandle = MirPtrType::get_generic(&mut ctx, field, true).into();
+            let field_addr = mir::MirFieldAddrOp::build(&mut ctx, slot, field_ptr_ty, 1)
+                .expect("field address build");
+            field_addr.insert_at_back(block, &ctx);
+            let field_ptr = field_addr.deref(&ctx).get_result(0);
+            let field_load = Operation::new(
+                &mut ctx,
+                mir::MirLoadOp::get_concrete_op_info(),
+                vec![field],
+                vec![field_ptr],
+                vec![],
+                0,
+            );
+            field_load.insert_at_back(block, &ctx);
+            let field_value = field_load.deref(&ctx).get_result(0);
+            let field_store = Operation::new(
+                &mut ctx,
+                mir::MirStoreOp::get_concrete_op_info(),
+                vec![],
+                vec![field_ptr, field_value],
+                vec![],
+                0,
+            );
+            field_store.insert_at_back(block, &ctx);
+            append_mir_return(&mut ctx, block, vec![]);
+
+            crate::lower_mir_to_llvm(&mut ctx, module).expect("multi-leaf carrier local");
+
+            let body = kernel_blocks(&ctx, module);
+            let allocas = find_all::<llvm::AllocaOp>(&ctx, &body);
+            let loads = find_all::<llvm::LoadOp>(&ctx, &body);
+            let stores = find_all::<llvm::StoreOp>(&ctx, &body);
+            assert_eq!((allocas.len(), loads.len(), stores.len()), (2, 2, 3));
+            let memory_types = allocas
+                .iter()
+                .map(|alloca| alloca.result_pointee_type(&ctx))
+                .chain(loads.iter().map(|load| {
+                    load.get_operation()
+                        .deref(&ctx)
+                        .get_result(0)
+                        .get_type(&ctx)
+                }))
+                .chain(
+                    stores
+                        .iter()
+                        .map(|store| store.get_operand_value(&ctx).get_type(&ctx)),
+                );
+            for ty in memory_types {
+                assert!(
+                    !llvm_type_contains_pointer_in_address_space(&ctx, ty, llvm_addr::SHARED),
+                    "local memory must hold only generic pointers"
+                );
+            }
+        }
     }
 
     #[test]

@@ -17,6 +17,7 @@ use crate::kernel::scope::{
     strip_grid_constant_config_markers, strip_unchecked_indexing_config_marker,
     top_level_kernel_configuration_markers, unchecked_indexing_impl_clone,
 };
+use crate::kernel::shared::take_block_shared;
 use crate::launch_attrs::validate_routed_launch_contract_requires;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -39,6 +40,10 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
     mut input: ItemFn,
     explicit_scope: Option<Ident>,
 ) -> TokenStream2 {
+    let shared = match take_block_shared(&mut input) {
+        Ok(shared) => shared,
+        Err(error) => return error.to_compile_error(),
+    };
     let entry_inputs = input.sig.inputs.clone();
     // A routed `#[launch_contract]` expands later on the generated entry
     // wrapper, whose synthetic parameter names cannot resolve source-level
@@ -173,6 +178,13 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
         generate_generic_cuda_kernel_impl(fn_name, vis, generics, where_clause, &cfg_attrs);
     let mut implementation_args: Vec<TokenStream2> =
         arg_names.iter().map(|name| quote! { #name }).collect();
+    let (shared_prologue, entry_unsafety) = if let Some(shared) = &shared {
+        let (prologue, slice) = shared.prologue(&arg_names[shared.index], Some(&arg_names));
+        implementation_args[shared.index] = slice;
+        (prologue, quote! { unsafe })
+    } else {
+        (quote! {}, quote! { #unsafety })
+    };
     if let Some(scope) = &rewritten_scope {
         let scope_ident = &scope.ident;
         if has_explicit_scope {
@@ -221,8 +233,9 @@ pub(crate) fn generic_kernel_no_instantiation_tokens(
         // pattern forwardable without carrying local binding `mut`.
         #(#entry_attrs)*
         #[inline(never)]
-        #vis #constness #unsafety #abi fn #kernel_name #generics (#(#wrapper_inputs),*) #output #where_clause {
+        #vis #constness #entry_unsafety #abi fn #kernel_name #generics (#(#wrapper_inputs),*) #output #where_clause {
             #(#entry_config_markers)*
+            #shared_prologue
             #(#scope_bindings)*
             #implementation_call
         }
@@ -308,6 +321,10 @@ pub(super) fn generate_simple_kernel(
     mut input: ItemFn,
     explicit_scope: Option<Ident>,
 ) -> TokenStream {
+    let shared = match take_block_shared(&mut input) {
+        Ok(shared) => shared,
+        Err(error) => return error.to_compile_error().into(),
+    };
     if let Some(ident) = explicit_scope {
         let scope = explicit_kernel_scope(&mut input, ident);
         let bindings = explicit_kernel_scope_bindings(&scope);
@@ -321,6 +338,13 @@ pub(super) fn generate_simple_kernel(
 
     // Clone the original function for the CudaKernel impl
     let original_fn = input.clone();
+    if let Some(shared) = &shared {
+        let name = &shared.name;
+        let (prologue, slice) = shared.prologue(name, None);
+        let prefix: syn::Block = syn::parse_quote! { { #prologue let #name = #slice; } };
+        input.block.stmts.splice(0..0, prefix.stmts);
+        input.sig.safety = syn::parse_quote! { unsafe };
+    }
     input.sig.ident = new_name;
 
     // PTX entry name is the unprefixed user name; the collector strips

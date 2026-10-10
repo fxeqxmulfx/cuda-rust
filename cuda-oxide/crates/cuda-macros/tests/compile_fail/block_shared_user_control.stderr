@@ -1,0 +1,5 @@
+error: shared offsets allow integer arithmetic on `block`, usize kernel scalars, and usize const parameters
+ --> tests/compile_fail/block_shared_user_control.rs:9:41
+  |
+9 | fn invalid(#[block_shared(128, offset = { return; })] input: &[f32]) {}
+  |                                         ^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error[E0594]: cannot assign to `input[_]`, which is behind a `&` reference
+ --> tests/compile_fail/block_shared_write.rs:9:50
+  |
+9 | fn invalid(#[block_shared(128)] input: &[f32]) { input[0] = 0.0; }
+  |                                                  ^^^^^^^^^^^^^^ `input` is a `&` reference, so it cannot be written to

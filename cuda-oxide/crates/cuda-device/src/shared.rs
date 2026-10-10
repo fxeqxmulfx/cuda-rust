@@ -547,3 +547,55 @@ pub unsafe fn cvta_generic_to_shared_u32(ptr: *const u8) -> u32 {
 }
 
 include!("generated/shared_sreg.rs");
+
+mod tile_element {
+    pub trait Sealed {}
+    impl Sealed for f32 {}
+    impl Sealed for f64 {}
+    impl Sealed for i32 {}
+    impl Sealed for u32 {}
+    impl Sealed for i64 {}
+    impl Sealed for u64 {}
+}
+
+/// Primitive immutable elements accepted by compiler-staged tiles.
+///
+/// Sealing keeps aliases and shadowed primitive names from changing the
+/// initialization or immutability contract established by the macro.
+#[doc(hidden)]
+pub trait __TileElement: tile_element::Sealed + Copy {}
+impl __TileElement for f32 {}
+impl __TileElement for f64 {}
+impl __TileElement for i32 {}
+impl __TileElement for u32 {}
+impl __TileElement for i64 {}
+impl __TileElement for u64 {}
+
+/// Lifetime guard for a compiler-initialized immutable block tile.
+///
+/// This implementation detail is public only for proc-macro expansion.
+/// Safe kernel code obtains a borrowed slice with `#[block_shared(N)]`.
+#[doc(hidden)]
+pub struct __ReadOnlyTile<T: __TileElement> {
+    pointer: *const T,
+    len: usize,
+}
+
+impl<T: __TileElement> __ReadOnlyTile<T> {
+    /// # Safety
+    /// `pointer` must address `len` initialized, properly aligned elements in
+    /// the current block's shared memory. All block threads must have finished
+    /// initialization and synchronized. No writes may occur for the remaining
+    /// kernel lifetime, and the guard must not escape the kernel invocation.
+    #[inline(always)]
+    pub unsafe fn from_initialized(pointer: *const T, len: usize) -> Self {
+        Self { pointer, len }
+    }
+
+    #[inline(always)]
+    pub fn as_slice(&self) -> &[T] {
+        // SAFETY: the constructor establishes initialization, alignment,
+        // visibility, and immutability. The borrow cannot outlive this guard.
+        unsafe { core::slice::from_raw_parts(self.pointer, self.len) }
+    }
+}

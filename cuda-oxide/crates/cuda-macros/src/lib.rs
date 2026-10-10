@@ -435,6 +435,19 @@ pub fn cuda_module(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// at most 1,024 body copies, 8,192 cloned basic blocks, and 65,536 cloned
 /// operations. Factors above 1,024 are rejected; unsupported loop shapes warn
 /// and are not unrolled.
+///
+/// One immutable numeric slice parameter may use `#[block_shared(N)]` to
+/// stage a read-only block tile before user code executes. `N` must be a
+/// literal in `1..=4096`, and a one-dimensional `#[launch_contract]` must
+/// appear below `#[kernel]`. The default source offset is `block * N`;
+/// `offset = expr` supports integer arithmetic on `block`, `usize` scalar
+/// arguments, and `usize` const parameters. User calls and control flow are
+/// rejected. Short tails and out-of-range offsets yield shorter or empty
+/// slices. The generated entry initializes all storage and synchronizes
+/// before making a slice borrowed from a local guard. Direct entry calls
+/// require `unsafe`; prepared host launchers remain safe. Explicit slice
+/// lifetimes, mutable slices, unchecked indexing, and legacy explicit
+/// instantiation are not supported for staged tiles.
 #[proc_macro_attribute]
 pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
     kernel::kernel_entry(attr, item)

@@ -1,0 +1,5 @@
+error: shared tiles require checked #[kernel] without legacy explicit instantiation
+ --> tests/compile_fail/block_shared_unchecked.rs:9:1
+  |
+9 | fn invalid(#[block_shared(128)] input: &[f32]) {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

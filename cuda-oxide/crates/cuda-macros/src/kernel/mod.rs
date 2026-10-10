@@ -7,6 +7,7 @@
 
 pub(crate) mod codegen;
 pub(crate) mod scope;
+pub(crate) mod shared;
 
 use crate::common::{
     attr_path_ends_with, grid_constant_pointee, impl_trait_parameter_error,
@@ -190,6 +191,17 @@ pub(crate) fn kernel_entry(attr: TokenStream, item: TokenStream) -> TokenStream 
     }
     if let Some(err) = impl_trait_parameter_error(&input, "kernel") {
         return err.to_compile_error().into();
+    }
+    let has_shared = input.sig.inputs.iter().any(|arg| {
+        matches!(arg, FnArg::Typed(arg) if arg.attrs.iter().any(|attr| attr_path_ends_with(attr, "block_shared")))
+    });
+    if has_shared && (unchecked_indexing || !instantiate_types.is_empty()) {
+        return syn::Error::new_spanned(
+            &input.sig,
+            "shared tiles require checked #[kernel] without legacy explicit instantiation",
+        )
+        .to_compile_error()
+        .into();
     }
     if let Err(error) = inject_grid_constant_markers(&mut input) {
         return error.to_compile_error().into();

@@ -127,6 +127,45 @@ fn transform<P: TransformPolicy>(out: DisjointSlice<u32>) { /* ... */ }
 `MAX_THREADS` is the largest accepted block, not an exact block size. A
 prepared launch checks the concrete value for `P` before calling CUDA.
 
+### Immutable entry-staged tiles
+
+`#[block_shared(N)]` on one immutable numeric slice parameter stages a
+read-only tile before any user code runs. `N` is a literal in `1..=4096`;
+supported elements are `f32`, `f64`, `i32`, `u32`, `i64`, and `u64`.
+Place `#[launch_contract(domain = 1, ...)]` below `#[kernel]`.
+
+```rust,ignore
+#[kernel]
+#[launch_contract(domain = 1, block = (128, 1, 1))]
+pub fn neighbor(#[block_shared(128)] input: &[f32], mut out: DisjointSlice<f32>) {
+    let index = thread::index_1d();
+    let local = index.get() % 128;
+    if local >= input.len() { return; }
+    if let Some(value) = out.get_mut(index) {
+        *value = input[(local + 1) % input.len()];
+    }
+}
+```
+
+The default source offset is `block * N`. For grouped attention rows, use
+`#[block_shared(512, offset = (block / sequence) * sequence * W)]`.
+Offsets permit integer arithmetic on the block index, `usize` kernel scalar
+parameters, and `usize` const parameters. Calls, memory accesses, and user
+control flow are rejected. Scalar arguments are uniform within a CUDA block.
+An offset beyond the source produces an empty tile; tails produce shorter
+slices. The host launcher still receives the complete original device buffer.
+
+The generated entry initializes every shared element through disjoint raw
+pointers, then all threads synchronize unconditionally. User code receives
+only an immutable slice borrowed from a local lifetime guard. Explicit
+lifetimes and mutable slice parameters are rejected. Early returns after
+staging are allowed. Generic ordinary helpers retain their original global
+slice semantics and contain no staging or barriers. Direct calls to the
+generated collective entry require `unsafe`; contracted host launches stay
+safe. This API supports a single initialization phase, with no subsequent
+shared writes. Unchecked indexing and legacy explicit kernel instantiation
+cannot be combined with entry-staged tiles.
+
 ### `SharedArray<T, N, ALIGN>` and `DynamicSharedArray<T, ALIGN>`
 
 Block-scoped shared memory. `SharedArray` is compile-time sized; `DynamicSharedArray` is runtime-sized (set via `LaunchConfig::shared_mem_bytes`). Both are `!Sync` -- concurrent access requires explicit GPU barriers.

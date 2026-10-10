@@ -8,6 +8,17 @@
 #[test]
 fn launch_contract_types_are_resolved_semantically() {
     let t = trybuild::TestCases::new();
+    t.compile_fail("tests/compile_fail/block_shared_shadowed_offset.rs");
+    t.compile_fail("tests/compile_fail/block_shared_shadowed_element.rs");
+
+    t.compile_fail("tests/compile_fail/block_shared_user_control.rs");
+    t.compile_fail("tests/compile_fail/block_shared_unchecked.rs");
+
+    t.compile_fail("tests/compile_fail/block_shared_mutable.rs");
+    t.compile_fail("tests/compile_fail/block_shared_escape.rs");
+    t.compile_fail("tests/compile_fail/block_shared_write.rs");
+    t.compile_fail("tests/compile_fail/block_shared_named_lifetime.rs");
+    t.pass("tests/pass/block_shared_safe_launch.rs");
     t.pass("tests/pass/launch_contract_disjoint_aliases.rs");
     t.pass("tests/pass/launch_contract_borrowed_views.rs");
     t.pass("tests/pass/launch_contract_const_dimensions.rs");

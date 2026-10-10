@@ -1,0 +1,13 @@
+error: #[block_shared] requires an immutable slice with an elided lifetime
+ --> tests/compile_fail/block_shared_mutable.rs:9:40
+  |
+9 | fn invalid(#[block_shared(128)] input: &mut [f32]) {}
+  |                                        ^^^^^^^^^^
+
+warning: unused import: `launch_contract`
+ --> tests/compile_fail/block_shared_mutable.rs:5:27
+  |
+5 | use cuda_device::{kernel, launch_contract};
+  |                           ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

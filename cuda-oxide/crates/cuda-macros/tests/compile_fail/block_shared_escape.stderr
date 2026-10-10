@@ -1,0 +1,8 @@
+error[E0515]: cannot return value referencing temporary value
+ --> tests/compile_fail/block_shared_escape.rs:9:68
+  |
+7 | #[kernel]
+  | --------- temporary value created here
+8 | #[launch_contract(domain = 1, block = (32, 1, 1))]
+9 | fn invalid(#[block_shared(128)] input: &[f32]) -> &'static [f32] { input }
+  |                                                                    ^^^^^ returns a value referencing data owned by the current function

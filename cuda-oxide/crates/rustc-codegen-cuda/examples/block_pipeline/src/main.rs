@@ -88,6 +88,26 @@ mod kernels {
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1)]
+    pub fn view<const C: usize>(
+        input: &[f32],
+        offset: usize,
+        rows: usize,
+        stride: usize,
+        mut out: DisjointSlice<f32>,
+    ) {
+        let index = thread::index_1d();
+        let tile = BlockTile::new(input, offset, rows, C, stride);
+        let mut sum = 0.0;
+        for row in 0..rows {
+            sum += tile.load(row, index.get() % C);
+        }
+        if let Some(value) = out.get_mut(index) {
+            *value = sum;
+        }
+    }
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1)]
     pub fn striped<const D: usize>(mut out: DisjointSlice<f32, thread::StripedWarp<D>>) {
         for column in 0..D + 13 {
             if let Some(index) = thread::striped_index::<D>(column) {
@@ -222,6 +242,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(actual, expected, "threads={threads} i={i}");
         }
     }
-    println!("275 pipeline cases and 9 partial-warp cases passed");
+    let input: Vec<f32> = (0..300).map(|i| i as f32).collect();
+    let device = DeviceBuffer::from_host(&stream, &input)?;
+    let cases = [
+        (0, 4, 32),
+        (5, 3, 40),
+        (100, 7, 33),
+        (299, 2, 0),
+        (300, 2, 1),
+        (usize::MAX, 2, 1),
+        (7, 3, usize::MAX / 2 + 1),
+        (usize::MAX - 40, 3, 20),
+    ];
+    for (offset, rows, stride) in cases {
+        let mut out = DeviceBuffer::zeroed(&stream, 96)?;
+        let launch = module.prepare_view::<40>(LaunchConfig1D::new(3, 32, 0))?;
+        module.view(&stream, &launch, &device, offset, rows, stride, &mut out)?;
+        for (i, actual) in out.to_host_vec(&stream)?.into_iter().enumerate() {
+            let expected: f32 = (0..rows)
+                .map(|row| {
+                    let index = row as u128 * stride as u128 + offset as u128 + (i % 40) as u128;
+                    if index < 300 {
+                        input[index as usize]
+                    } else {
+                        0.0
+                    }
+                })
+                .sum();
+            assert_eq!(
+                actual, expected,
+                "view offset={offset} stride={stride} i={i}"
+            );
+        }
+    }
+    println!("275 pipeline cases, 9 partial-warp cases and 8 view cases passed");
     Ok(())
 }

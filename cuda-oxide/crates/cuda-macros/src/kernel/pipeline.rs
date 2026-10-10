@@ -425,10 +425,10 @@ impl BlockPipeline {
             let guard = &guards[i];
             let view = internal_ident(&format!("__cuda_pipeline_view_{i}"));
             names.push(view.clone());
-            let layout = if source.swizzle {
-                quote! { .with_xor32() }
+            let constructor = if source.swizzle {
+                quote! { new_xor32 }
             } else {
-                quote! {}
+                quote! { new }
             };
             let destination = if source.swizzle {
                 quote! { (__cuda_pipeline_row * #columns + (__cuda_pipeline_col & !31usize) + ((__cuda_pipeline_col ^ __cuda_pipeline_row) & 31usize)) }
@@ -440,7 +440,7 @@ impl BlockPipeline {
                     // SAFETY: this slot was fully initialized, its copies completed,
                     // and all block threads synchronized before any borrowed view.
                     let #guard = unsafe { ::cuda_device::shared::__ReadOnlyTile::from_initialized(#pointer.wrapping_add(#slot * __cuda_pipeline_extent + #total), #rows * #columns) };
-                    let #view = ::cuda_device::shared::BlockTile::new(#guard.as_slice(), 0, #rows, #columns, #columns)#layout;
+                    let #view = ::cuda_device::shared::BlockTile::#constructor(#guard.as_slice(), 0, #rows, #columns, #columns);
                 });
                 let key = quote! { #columns; #stride; #base }.to_string();
                 let group = if let Some(group) = copy_groups.iter_mut().find(|g| g.key == key) {

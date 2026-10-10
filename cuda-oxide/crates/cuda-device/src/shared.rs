@@ -607,8 +607,8 @@ impl<T: __TileElement> __ReadOnlyTile<T> {
 /// Out-of-range rows, columns, offsets, and arithmetic overflow return `None`.
 /// The same view supports ordinary global-memory helpers and entry-staged tiles.
 pub struct BlockTile<'a, T> {
+    /// The elements from the offset.
     data: &'a [T],
-    offset: usize,
     rows: usize,
     columns: usize,
     stride: usize,
@@ -617,26 +617,72 @@ pub struct BlockTile<'a, T> {
 impl<'a, T> BlockTile<'a, T> {
     #[inline(always)]
     pub fn new(data: &'a [T], offset: usize, rows: usize, columns: usize, stride: usize) -> Self {
-        Self {
-            data,
-            offset,
-            rows,
-            columns,
-            stride,
-            xor32: false,
-        }
+        Self::with_layout(data, offset, rows, columns, stride, false)
     }
     /// Permute columns within each 32-element group to avoid shared-bank
     /// conflicts when a warp reads either rows or columns. Rows must be stored
     /// with the same XOR permutation; complete 32-column groups are required.
     #[inline(always)]
-    pub fn with_xor32(mut self) -> Self {
+    pub fn new_xor32(
+        data: &'a [T],
+        offset: usize,
+        rows: usize,
+        columns: usize,
+        stride: usize,
+    ) -> Self {
         assert!(
-            self.columns.is_multiple_of(32),
+            columns.is_multiple_of(32),
             "xor32 columns must be divisible by 32"
         );
-        self.xor32 = true;
-        self
+        Self::with_layout(data, offset, rows, columns, stride, true)
+    }
+
+    /// Check the limits one time, so that `index` has no overflow checks.
+    #[inline(always)]
+    fn with_layout(
+        data: &'a [T],
+        offset: usize,
+        mut rows: usize,
+        mut columns: usize,
+        stride: usize,
+        xor32: bool,
+    ) -> Self {
+        // A slice of elements that are not zero-sized has at most
+        // `isize::MAX` elements.
+        const {
+            assert!(
+                size_of::<T>() != 0,
+                "BlockTile elements must not be zero-sized"
+            )
+        };
+        let data = &data[offset.min(data.len())..];
+        let last = rows
+            .saturating_sub(1)
+            .checked_mul(stride)
+            .and_then(|start| start.checked_add(columns.saturating_sub(1)));
+        if last.is_none() {
+            // Then `stride` is not zero. Remove the rows that start at or
+            // after the end of `data`, and the columns at or after the end.
+            // With `xor32`, remove only the 32-column groups at or after the
+            // end. These rows and columns have no elements. Then each row
+            // starts before `data.len()`, and each column is less than
+            // `data.len()` rounded up to 32. Because `data.len() <= isize::MAX`,
+            // `index` cannot overflow. `max(1)` does not change `stride`. It
+            // removes the check for division by zero.
+            rows = rows.min(data.len().div_ceil(stride.max(1)));
+            columns = columns.min(if xor32 {
+                data.len().next_multiple_of(32)
+            } else {
+                data.len()
+            });
+        }
+        Self {
+            data,
+            rows,
+            columns,
+            stride,
+            xor32,
+        }
     }
     #[inline(always)]
     pub fn get(&self, row: usize, column: usize) -> Option<&T> {
@@ -670,9 +716,8 @@ impl<'a, T> BlockTile<'a, T> {
         } else {
             column
         };
-        row.checked_mul(self.stride)?
-            .checked_add(self.offset)?
-            .checked_add(column)
+        // The constructor makes sure that this does not overflow.
+        Some(row.wrapping_mul(self.stride).wrapping_add(column))
     }
 }
 
@@ -693,7 +738,7 @@ mod block_tile_tests {
                 }
             }
             assert!(written[..64 * columns].iter().all(|&value| value));
-            let tile = BlockTile::new(&data, 0, 64, columns, columns).with_xor32();
+            let tile = BlockTile::new_xor32(&data, 0, 64, columns, columns);
             for row in 0..64 {
                 for column in 0..columns {
                     assert_eq!(tile.get(row, column), Some(&(row * columns + column)));
@@ -741,7 +786,7 @@ mod block_tile_tests {
     #[test]
     #[should_panic(expected = "xor32 columns must be divisible by 32")]
     fn xor32_rejects_incomplete_column_groups() {
-        BlockTile::new(&[0u32; 65], 0, 1, 65, 65).with_xor32();
+        BlockTile::new_xor32(&[0u32; 65], 0, 1, 65, 65);
     }
 
     #[test]
@@ -761,5 +806,57 @@ mod block_tile_tests {
             BlockTile::new(&data, 0, usize::MAX, 2, usize::MAX).get(2, 0),
             None
         );
+    }
+
+    #[test]
+    fn limits_checked_one_time_match_exact_arithmetic() {
+        let data: [usize; 70] = core::array::from_fn(|index| index);
+        let half = usize::MAX / 2;
+        for offset in [0, 1, 5, 69, 70, 71, usize::MAX] {
+            for stride in [0, 1, 3, 32, 70, 71, half, half + 1, usize::MAX] {
+                for rows in [0, 1, 2, 3, usize::MAX] {
+                    for columns in [0, 1, 2, 32, 64, 70, usize::MAX & !31, usize::MAX] {
+                        for xor32 in [false, true] {
+                            if xor32 && !columns.is_multiple_of(32) {
+                                continue;
+                            }
+                            let tile = if xor32 {
+                                BlockTile::new_xor32(&data, offset, rows, columns, stride)
+                            } else {
+                                BlockTile::new(&data, offset, rows, columns, stride)
+                            };
+                            for row in [0, 1, 2, 3, rows.saturating_sub(1), rows, usize::MAX] {
+                                for column in (0..80).chain([
+                                    columns.saturating_sub(1),
+                                    columns,
+                                    usize::MAX - 31,
+                                    usize::MAX,
+                                ]) {
+                                    let expected = (row < rows && column < columns)
+                                        .then(|| {
+                                            let column = if xor32 {
+                                                (column & !31) + ((column ^ row) & 31)
+                                            } else {
+                                                column
+                                            };
+                                            let index = row as u128 * stride as u128
+                                                + offset as u128
+                                                + column as u128;
+                                            data.get(usize::try_from(index).ok()?).copied()
+                                        })
+                                        .flatten();
+                                    assert_eq!(
+                                        tile.get(row, column).copied(),
+                                        expected,
+                                        "{offset} {stride} {rows} {columns} {xor32} {row} {column}"
+                                    );
+                                    assert_eq!(tile.load(row, column), expected.unwrap_or(0));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

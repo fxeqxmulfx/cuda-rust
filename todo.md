@@ -58,7 +58,7 @@ after each device fix.
   checks `thread >= threads`, which cannot occur, and checks that the lane owns
   the column. It also calculates the warp base again. Add an iterator over the
   columns of the lane that calculates the base one time.
-- [ ] [`BlockTile::index`](cuda-oxide/crates/cuda-device/src/shared.rs) does
+- [x] [`BlockTile::index`](cuda-oxide/crates/cuda-device/src/shared.rs) does
   `checked_mul` and `checked_add` for each access. In the staged pipeline, LLVM
   removes them, but views with a runtime offset or stride keep them. Check the
   limits one time in `BlockTile::new`.

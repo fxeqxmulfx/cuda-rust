@@ -104,10 +104,10 @@ fn const_rows_and_xor32_layout_preserve_expression_grouping() {
     assert!(bytes.contains("pipeline stride overflow"));
     let staged = pipeline.body(true);
     let body = quote::quote!(#staged).to_string();
-    assert!(body.contains("with_xor32"));
+    assert!(body.contains("new_xor32"));
     assert!(body.contains("__cuda_pipeline_col ^ __cuda_pipeline_row"));
     let global = pipeline.body(false);
-    assert!(!quote::quote!(#global).to_string().contains("with_xor32"));
+    assert!(!quote::quote!(#global).to_string().contains("new_xor32"));
     syn::parse2::<syn::File>(generic_kernel_no_instantiation_tokens(input, None)).unwrap();
 }
 

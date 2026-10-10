@@ -6,7 +6,8 @@
 # must check the overflow one time for each tile, not for each element. The
 # copy fills the elements out of bounds with zero, so the pipeline kernels have
 # no shared stores. Row-major tiles with 16-byte rows and strides must also
-# have a 16-byte copy.
+# have a 16-byte copy. A `BlockTile` with a runtime offset and stride must also
+# check the overflow one time, not for each element.
 
 set -euo pipefail
 
@@ -15,16 +16,17 @@ ptx="${root}/block_pipeline.ptx"
 
 test -s "${ptx}"
 
-# Print "entry loop" for each innermost loop of a pipeline entry that matches
-# both regular expressions. LLVM writes the loop of each basic block as a
-# comment.
+# Print "entry loop" for each innermost loop of an entry of the kernels in the
+# first regular expression that matches the other two regular expressions.
+# LLVM writes the loop of each basic block as a comment.
 loops_with() {
-    awk -v first="$1" -v second="$2" '
-        /^\.visible \.entry (sum|swizzled)_TID_/ {
+    awk -v kernels="$1" -v first="$2" -v second="$3" '
+        /^\.visible \.entry / {
             entry = $3
             sub(/\(.*/, "", entry)
+            if (entry !~ "^(" kernels ")_TID_") entry = ""
+            loop = "none"
         }
-        /^\.visible \.entry / && !/(sum|swizzled)_TID_/ { entry = "" }
         entry == "" { next }
         /^\$L__BB[0-9_]+:/ {
             label = $1
@@ -37,8 +39,8 @@ loops_with() {
             loop = substr($0, RSTART + 7, RLENGTH - 7)
         }
         /This (Inner )?Loop Header/ { loop = label }
-        $0 ~ first { has_first[entry " " loop] = 1 }
-        $0 ~ second { has_second[entry " " loop] = 1 }
+        loop != "none" && $0 ~ first { has_first[entry " " loop] = 1 }
+        loop != "none" && $0 ~ second { has_second[entry " " loop] = 1 }
         END {
             for (key in has_first) {
                 if (key in has_second) print key
@@ -48,11 +50,11 @@ loops_with() {
 }
 
 copy='cp[.]async[.]c[ag][.]shared'
-if [[ -z "$(loops_with "${copy}" "${copy}")" ]]; then
+if [[ -z "$(loops_with 'sum|swizzled' "${copy}" "${copy}")" ]]; then
     echo "error: no copy loop in ${ptx}" >&2
     exit 1
 fi
-checked="$(loops_with "${copy}" 'mul[.]hi[.]u64')"
+checked="$(loops_with 'sum|swizzled' "${copy}" 'mul[.]hi[.]u64')"
 if [[ -n "${checked}" ]]; then
     echo "error: overflow check in the copy loop of ${ptx}: ${checked}" >&2
     exit 1
@@ -83,6 +85,21 @@ if [[ "$(vector_entries sum)" != 2 ]]; then
 fi
 if [[ "$(vector_entries swizzled)" != 0 ]]; then
     echo "error: 16-byte copy in a swizzled kernel of ${ptx}" >&2
+    exit 1
+fi
+
+load='ld[.]global[.]'
+if [[ -z "$(loops_with view "${load}" "${load}")" ]]; then
+    echo "error: no load loop in the view kernel of ${ptx}" >&2
+    exit 1
+fi
+checked="$(loops_with view "${load}" 'mul[.]hi[.]u64')"
+if [[ -n "${checked}" ]]; then
+    echo "error: overflow check in the load loop of ${ptx}: ${checked}" >&2
+    exit 1
+fi
+if awk '/^\.visible \.entry view_TID_/,/^}/' "${ptx}" | grep -E 'trap' >/dev/null; then
+    echo "error: trap in the view kernel of ${ptx}" >&2
     exit 1
 fi
 

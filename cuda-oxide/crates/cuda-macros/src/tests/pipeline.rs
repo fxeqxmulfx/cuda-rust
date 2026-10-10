@@ -101,6 +101,7 @@ fn const_rows_and_xor32_layout_preserve_expression_grouping() {
     let bytes = quote::quote!(#bytes).to_string();
     assert!(bytes.contains("pipeline rows must be in 1..=64"));
     assert!(bytes.contains("is_multiple_of (32)"));
+    assert!(bytes.contains("pipeline stride overflow"));
     let staged = pipeline.body(true);
     let body = quote::quote!(#staged).to_string();
     assert!(body.contains("with_xor32"));
@@ -143,7 +144,16 @@ fn equal_source_layouts_share_copy_indices_but_keep_separate_bounds() {
     let staged = pipeline.body(true);
     let body = quote::quote!(#staged).to_string();
     assert_eq!(body.matches("while __cuda_pipeline_lane").count(), 2);
-    assert_eq!(body.matches("n < input . len").count(), 2);
-    assert_eq!(body.matches("n < other . len").count(), 2);
-    assert_eq!(body.matches("cp_async_ca_4").count(), 4);
+    assert_eq!(body.matches("input . len () . saturating_sub").count(), 2);
+    assert_eq!(body.matches("other . len () . saturating_sub").count(), 2);
+    assert_eq!(body.matches("cp_async_ca_zfill_4").count(), 4);
+    // Only the tile base has overflow checks. The element loop compares the
+    // element with the limit of each source.
+    for copy in body.split("while __cuda_pipeline_lane").skip(1) {
+        let element = &copy[..copy.find("__cuda_pipeline_lane +=").unwrap()];
+        assert!(!element.contains("checked_"));
+        assert!(!element.contains("saturating_"));
+        assert!(!element.contains("write"));
+        assert_eq!(element.matches("__cuda_pipeline_src <").count(), 2);
+    }
 }

@@ -45,7 +45,7 @@ after each device fix.
   [`BlockShared::prologue`](cuda-oxide/crates/cuda-macros/src/kernel/shared.rs)
   does a bounds check with a `trap` for each element. The loop condition
   already gives `base + lane < len`. Use `get_unchecked`.
-- [ ] The pipeline copy loop in
+- [x] The pipeline copy loop in
   [`BlockPipeline::body`](cuda-oxide/crates/cuda-macros/src/kernel/pipeline.rs)
   does checked 64-bit arithmetic for each element. After the first tile, each
   element gets `mul.hi.u64`, `mul.lo.s64` and two overflow checks. Check the

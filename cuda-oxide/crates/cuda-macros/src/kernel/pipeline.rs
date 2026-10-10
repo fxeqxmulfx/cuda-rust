@@ -115,6 +115,7 @@ struct CopyGroup {
     stride: Expr,
     offset: Ident,
     types: Vec<proc_macro2::TokenStream>,
+    limits: Vec<proc_macro2::TokenStream>,
     stores: Vec<proc_macro2::TokenStream>,
 }
 pub(crate) struct BlockPipeline {
@@ -364,9 +365,12 @@ impl BlockPipeline {
         let mut total = quote! { 0usize };
         for source in &self.sources {
             let columns = remap(&source.columns);
+            let stride = remap(&source.stride);
             if source.swizzle {
                 total = quote! { { assert!((#columns as ::core::primitive::usize).is_multiple_of(32), "xor32 columns must be divisible by 32"); #total } };
             }
+            // The staged copy computes `row * stride + col` without overflow checks.
+            total = quote! { { assert!(match (rows - 1).checked_mul(#stride as ::core::primitive::usize) { Some(n) => n.checked_add(#columns as ::core::primitive::usize).is_some(), None => false }, "pipeline stride overflow"); #total } };
             total = quote! { match (#total).checked_add(#columns as ::core::primitive::usize) { Some(n) => n, None => panic!("pipeline columns overflow") } };
         }
         syn::parse_quote! { { let rows: ::core::primitive::usize = #rows; assert!(rows.wrapping_sub(1) < 64, "pipeline rows must be in 1..=64"); match (#total).checked_mul(2 * rows * ::core::mem::size_of::<#element>()) { Some(n) => n, None => panic!("pipeline shared memory overflow") } } }
@@ -394,11 +398,17 @@ impl BlockPipeline {
             .map(|(i, _)| internal_ident(&format!("__cuda_pipeline_guard_{i}")))
             .collect::<Vec<_>>();
         let element = &self.element;
-        let copy = if matches!(element, Type::Path(p) if p.path.is_ident("f32") || p.path.is_ident("u32") || p.path.is_ident("i32"))
+        let (copy, size) = if matches!(element, Type::Path(p) if p.path.is_ident("f32") || p.path.is_ident("u32") || p.path.is_ident("i32"))
         {
-            quote! { ::cuda_device::async_copy::cp_async_ca_4 }
+            (
+                quote! { ::cuda_device::async_copy::cp_async_ca_zfill_4 },
+                4u32,
+            )
         } else {
-            quote! { ::cuda_device::async_copy::cp_async_ca_8 }
+            (
+                quote! { ::cuda_device::async_copy::cp_async_ca_zfill_8 },
+                8u32,
+            )
         };
         for (i, source) in self.sources.iter().enumerate() {
             let name = &source.name;
@@ -437,22 +447,31 @@ impl BlockPipeline {
                         stride: stride.clone(),
                         offset: offset.clone(),
                         types: Vec::new(),
+                        limits: Vec::new(),
                         stores: Vec::new(),
                     });
                     copy_groups.last_mut().unwrap()
                 };
                 // Check each source's primitive type even when no copy executes.
                 group.types.push(quote! { let #name: &[#element] = #name; });
+                let limit = internal_ident(&format!("__cuda_pipeline_limit_{i}"));
+                let tile = internal_ident(&format!("__cuda_pipeline_tile_{i}"));
+                // Elements `src < limit` of the tile are in the source slice.
+                group.limits.push(quote! {
+                    let #limit = #name.len().saturating_sub(__cuda_pipeline_base);
+                    let #tile = #name.as_ptr().wrapping_add(__cuda_pipeline_base);
+                });
                 group.stores.push(quote! {
                     // SAFETY: lanes partition this source's writable region. Other
                     // sources occupy disjoint regions. Equal layouts share address
                     // arithmetic, but each source retains its own bounds check.
-                    // The scheduler completes all copies before publication/reuse.
+                    // A copy reads only elements in the source slice and fills the
+                    // other elements with zero. The scheduler completes all copies
+                    // before publication/reuse.
                     unsafe {
                         let dst = #pointer.add(__cuda_pipeline_copy_slot * __cuda_pipeline_extent + #total + #destination);
-                        if let Some(src) = __cuda_pipeline_src.filter(|&n| n < #name.len()) {
-                            #copy(dst.cast::<u32>(), #name.as_ptr().add(src).cast::<u32>());
-                        } else { dst.write(0 as #element); }
+                        let size = if __cuda_pipeline_src < #limit { #size } else { 0 };
+                        #copy(dst.cast::<u32>(), #tile.wrapping_add(__cuda_pipeline_src).cast::<u8>(), size);
                     }
                 });
             } else {
@@ -464,17 +483,21 @@ impl BlockPipeline {
             total = quote! { (#total + #rows * #columns) };
         }
         let copy_threads = self.threads as usize;
-        let copies: Vec<_> = copy_groups.into_iter().map(|CopyGroup { columns, stride, offset, types, stores, .. }| quote! {
+        let copies: Vec<_> = copy_groups.into_iter().map(|CopyGroup { columns, stride, offset, types, limits, stores, .. }| quote! {
             #(#types)*
+            // Check the overflow one time for each tile. An element is at
+            // `base + src` of the source slice. A saturated base is not in
+            // the limits of a slice.
+            let __cuda_pipeline_base = (#copy_iteration).saturating_mul(#rows)
+                .saturating_mul(#stride)
+                .saturating_add(#offset);
+            #(#limits)*
             let mut __cuda_pipeline_lane = ::cuda_device::thread::threadIdx_x() as ::core::primitive::usize;
             while __cuda_pipeline_lane < #rows * #columns {
                 let __cuda_pipeline_row = __cuda_pipeline_lane / #columns;
                 let __cuda_pipeline_col = __cuda_pipeline_lane % #columns;
-                let __cuda_pipeline_src = (#copy_iteration).checked_mul(#rows)
-                    .and_then(|n| n.checked_add(__cuda_pipeline_row))
-                    .and_then(|n| n.checked_mul(#stride))
-                    .and_then(|n| n.checked_add(#offset))
-                    .and_then(|n| n.checked_add(__cuda_pipeline_col));
+                // `bytes` makes sure that this does not overflow.
+                let __cuda_pipeline_src = __cuda_pipeline_row.wrapping_mul(#stride).wrapping_add(__cuda_pipeline_col);
                 #(#stores)*
                 __cuda_pipeline_lane += #copy_threads;
             }

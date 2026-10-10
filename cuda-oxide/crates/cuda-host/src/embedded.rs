@@ -198,7 +198,8 @@ fn load_merged_ptx_bundles(
 /// module string. The module starts with the highest `.version` of all
 /// bundles and a `.target` that covers the targets of all bundles. The first
 /// PTX bundle keeps its `.address_size` header, and later bundles contribute
-/// bodies without it. Bundles without a PTX payload are skipped.
+/// bodies without it. Only the first bundle with DWARF sections keeps them.
+/// Bundles without a PTX payload are skipped.
 ///
 /// This is the pure half of [`load_all_ptx_bundles_merged`], exposed so tests
 /// and examples can check order-dependent merge properties: module-scope
@@ -336,6 +337,8 @@ struct PtxMergeState<'source> {
     version: Option<PtxVersion>,
     /// The `.target` that covers the targets of all bundles.
     target: Option<PtxTarget>,
+    /// The index of the first bundle with DWARF sections.
+    debug_sections: Option<usize>,
     /// For each function that a bundle declares `.extern`, the index of the
     /// first bundle with a `.visible` definition of it.
     extern_definitions: HashMap<&'source str, usize>,
@@ -385,6 +388,9 @@ impl<'source> PtxMergeState<'source> {
                         };
                         state.target = Some(joined);
                     }
+                    ".section" if is_debug_section(arguments) => {
+                        state.debug_sections.get_or_insert(index);
+                    }
                     _ => {}
                 }
             }
@@ -422,9 +428,10 @@ impl<'source> PtxMergeState<'source> {
     }
 }
 
-/// Strip the headers, shift debug indices past the previous bundles, rename
-/// the private symbols, and link the `.extern` declarations. Returns the
-/// rewritten text and its highest debug file index.
+/// Strip the headers, strip the DWARF sections if an earlier bundle has
+/// them, shift debug indices past the previous bundles, rename the private
+/// symbols, and link the `.extern` declarations. Returns the rewritten text
+/// and its highest debug file index.
 fn prepare_bundle_body(
     document: &ptx_parse::Document,
     bundle_name: &str,
@@ -444,6 +451,7 @@ fn prepare_bundle_body(
     // NVVM reflection string. Keep definitions and all references artifact-local
     // without changing kernel entry identities or explicit extern link names.
     let mut local_symbols = HashSet::new();
+    let mut removed_sections = Vec::new();
     for directive in document.directives() {
         match directive.name() {
             ".version" | ".target" => {
@@ -455,6 +463,27 @@ fn prepare_bundle_body(
                 edits
                     .delete(directive.line_span())
                     .map_err(|error| invalid_ptx(error.to_string()))?;
+            }
+            // ptxas reads each DWARF compile unit with the abbreviation table
+            // of the first one. The module keeps the sections of one bundle.
+            ".section"
+                if is_debug_section(directive.arguments())
+                    && state.debug_sections != Some(index) =>
+            {
+                let line = directive.line_span();
+                let end = document
+                    .scopes()
+                    .iter()
+                    .find(|scope| scope.header() == Some(directive.statement()))
+                    .map_or(line.end, |scope| {
+                        let end = scope.span().end;
+                        line.end
+                            .max(end + usize::from(ptx[end..].starts_with('\n')))
+                    });
+                edits
+                    .delete(line.start..end)
+                    .map_err(|error| invalid_ptx(error.to_string()))?;
+                removed_sections.push(line.start..end);
             }
             // A module-scope variable without a linkage directive.
             ".global" | ".const" | ".shared" if directive.scope() == ptx_parse::ScopeId::ROOT => {
@@ -516,7 +545,12 @@ fn prepare_bundle_body(
     let prefix = format!("cuda_oxide_merge_{index}_");
     for token in document.tokens() {
         let text = token.text(ptx);
-        if token.kind() == ptx_parse::TokenKind::Word && local_symbols.contains(text) {
+        if token.kind() == ptx_parse::TokenKind::Word
+            && local_symbols.contains(text)
+            && !removed_sections
+                .iter()
+                .any(|section| section.contains(&token.span().start))
+        {
             edits
                 .replace(token.span(), format!("{prefix}{text}"))
                 .map_err(|error| invalid_ptx(error.to_string()))?;
@@ -527,6 +561,11 @@ fn prepare_bundle_body(
         .apply(ptx)
         .map_err(|error| invalid_ptx(error.to_string()))?;
     Ok((body, max_file_index))
+}
+
+/// Whether a `.section` directive with `arguments` opens a DWARF section.
+fn is_debug_section(arguments: &str) -> bool {
+    arguments.trim_start().starts_with(".debug_")
 }
 
 /// The non-trivia tokens in `span`.
@@ -963,6 +1002,38 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "embedded CUDA module 'second' targets `sm_100`, which is not compatible with `sm_90a`"
+        );
+    }
+
+    #[test]
+    fn keeps_the_dwarf_sections_of_the_first_bundle_with_them() {
+        let plain = target_bundle("plain", "sm_80");
+        let debug_bundle = |name: &str| {
+            ptx_bundle(
+                name,
+                &format!(
+                    ".version 8.9\n.target sm_80, debug\n.address_size 64\n.global .align 1 .b8 data[1];\n.visible .entry {name}() {{ ret; }}\n\t.section\t.debug_info\n\t{{\n.b64 data\n\t}}\n\t.section\t.debug_macinfo\t{{\t}}\n"
+                ),
+            )
+        };
+        let (first, second) = (debug_bundle("first"), debug_bundle("second"));
+        assert_eq!(
+            merge_ptx_bundles([&plain, &first, &second]).unwrap(),
+            "\
+.version 8.9
+.target sm_80, debug
+.address_size 64
+.visible .entry plain() { ret; }
+.global .align 1 .b8 cuda_oxide_merge_1_data[1];
+.visible .entry first() { ret; }
+\t.section\t.debug_info
+\t{
+.b64 cuda_oxide_merge_1_data
+\t}
+\t.section\t.debug_macinfo\t{\t}
+.global .align 1 .b8 cuda_oxide_merge_2_data[1];
+.visible .entry second() { ret; }
+"
         );
     }
 

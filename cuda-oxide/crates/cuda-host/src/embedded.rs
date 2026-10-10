@@ -12,6 +12,7 @@ pub use cuda_core::embedded::{
     embedded_modules_from_current_exe,
 };
 use cuda_core::{CudaContext, CudaModule, DriverError};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -48,6 +49,16 @@ pub enum EmbeddedModuleError {
     /// PTX source could not be parsed or edited safely while merging bundles.
     #[error("embedded CUDA module '{name}' contains invalid PTX: {reason}")]
     InvalidPtx { name: String, reason: String },
+
+    /// No PTX target is valid for the code of all merged bundles.
+    #[error(
+        "embedded CUDA module '{name}' targets `{target}`, which is not compatible with `{merged}`"
+    )]
+    IncompatibleTarget {
+        name: String,
+        target: String,
+        merged: String,
+    },
 
     /// More than one bundle defines the same kernel entry.
     #[error("kernel entry '{entry}' is defined by both embedded modules '{first}' and '{second}'")]
@@ -135,9 +146,8 @@ fn artifact_bundles_containing(
 ///
 /// When a generic kernel is monomorphized in a consuming crate, its PTX ends
 /// up in that crate's bundle rather than the defining crate's bundle. This
-/// function gathers every PTX bundle in the binary, strips duplicate header
-/// directives (`.version`, `.target`, `.address_size`) from all but the first
-/// bundle, concatenates the bodies, and loads the result as one CUDA module.
+/// function gathers every PTX bundle in the binary, merges them with
+/// [`merge_ptx_bundles`], and loads the result as one CUDA module.
 /// All kernel symbols are therefore available regardless of which crate bundle
 /// they were compiled into.
 ///
@@ -184,9 +194,10 @@ fn load_merged_ptx_bundles(
 }
 
 /// Merge the PTX payloads of `bundles`, in iteration order, into one PTX
-/// module string: the first PTX bundle keeps its `.target` / `.address_size`
-/// headers, the highest `.version` is retained, and later bundles contribute bodies
-/// with those directives stripped. Bundles without a PTX payload are skipped.
+/// module string. The module starts with the highest `.version` of all
+/// bundles and a `.target` that covers the targets of all bundles. The first
+/// PTX bundle keeps its `.address_size` header, and later bundles contribute
+/// bodies without it. Bundles without a PTX payload are skipped.
 ///
 /// This is the pure half of [`load_all_ptx_bundles_merged`], exposed so tests
 /// and examples can check order-dependent merge properties: module-scope
@@ -199,9 +210,7 @@ fn load_merged_ptx_bundles(
 pub fn merge_ptx_bundles<'a>(
     bundles: impl IntoIterator<Item = &'a OwnedArtifactBundle>,
 ) -> Result<String, EmbeddedModuleError> {
-    let mut sources = Vec::new();
-    let mut state = PtxMergeState::default();
-    let mut version = (0u32, 0u32);
+    let mut documents = Vec::new();
     for bundle in bundles {
         if let Some(bytes) = bundle.payload(ArtifactPayloadKind::Ptx) {
             let source = std::str::from_utf8(bytes)
@@ -215,119 +224,211 @@ pub fn merge_ptx_bundles<'a>(
                     reason: error.to_string(),
                 }
             })?;
-            for directive in document
-                .directives()
-                .iter()
-                .filter(|d| d.name() == ".version")
-            {
-                let value = directive
-                    .arguments()
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("");
-                let parsed = value.split_once('.').and_then(|(major, minor)| {
-                    Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?))
-                });
-                version = version.max(parsed.ok_or_else(|| EmbeddedModuleError::InvalidPtx {
-                    name: bundle.name.clone(),
-                    reason: "invalid PTX version directive".into(),
-                })?);
-            }
-            // Explicit device externs keep their link names across bundles.
-            // Every other helper belongs to the artifact that compiled it.
-            for callable in document.callables() {
-                if callable.kind() == ptx_parse::CallableKind::Function && callable.is_extern() {
-                    state.extern_functions.insert(callable.name().to_string());
-                }
-            }
-            sources.push((bundle.name.as_str(), source));
+            documents.push((bundle.name.as_str(), document));
         }
     }
-    if sources.is_empty() {
+    if documents.is_empty() {
         return Err(EmbeddedModuleError::NoModules);
     }
 
+    let state = PtxMergeState::new(&documents)?;
+    // Later bundles may use instructions introduced after the ISA version or
+    // target of the first bundle. One header covers all bundles in every order.
     let mut merged = String::new();
+    if let Some((major, minor)) = state.version {
+        merged.push_str(&format!(".version {major}.{minor}\n"));
+    }
+    if let Some(target) = &state.target {
+        merged.push_str(&format!(".target {target}\n"));
+    }
     let mut file_index_offset = 0;
-    for (index, (name, source)) in sources.into_iter().enumerate() {
-        state.bundle_index = index;
+    for (index, (name, document)) in documents.iter().enumerate() {
         let (body, max_file_index) =
-            prepare_bundle_body(source, index != 0, file_index_offset, name, &mut state)?;
+            prepare_bundle_body(document, name, index, file_index_offset, &state)?;
         file_index_offset = file_index_offset.max(max_file_index);
         merged.push_str(&body);
         if !body.ends_with('\n') {
             merged.push('\n');
         }
     }
-    // Later bundles may use instructions introduced after the first bundle's
-    // ISA version. Keep their minimum version requirement in every merge order.
-    let document = ptx_parse::Document::parse(&merged).expect("validated PTX bodies");
-    if let Some(directive) = document
-        .directives()
-        .iter()
-        .find(|d| d.name() == ".version")
-    {
-        let span = directive.arguments_span();
-        let token = directive
-            .arguments()
-            .split_whitespace()
-            .next()
-            .unwrap_or("");
-        let mut edits = ptx_parse::EditScript::new();
-        edits
-            .replace(
-                span.start..span.start + token.len(),
-                format!("{}.{}", version.0, version.1),
-            )
-            .expect("single header edit");
-        merged = edits.apply(&merged).expect("single header edit");
-    }
     Ok(merged)
 }
 
-#[derive(Default)]
-struct PtxMergeState {
-    entries: std::collections::BTreeMap<String, String>,
-    extern_functions: std::collections::BTreeSet<String>,
-    bundle_index: usize,
+/// PTX ISA version from a `.version` directive, as (major, minor).
+type PtxVersion = (u32, u32);
+
+/// PTX target from a `.target` directive: the architecture, its `a` or `f`
+/// suffix, and options such as `debug`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PtxTarget {
+    capability: u32,
+    suffix: Option<char>,
+    options: Vec<String>,
 }
 
-/// Strip repeated headers and shift debug indices past the previous bundles.
+impl PtxTarget {
+    fn parse(arguments: &str) -> Option<Self> {
+        let mut parts = arguments.split(',').map(str::trim);
+        let arch = parts.next()?.strip_prefix("sm_")?;
+        let digits = arch
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(arch.len());
+        let suffix = match &arch[digits..] {
+            "" => None,
+            "a" => Some('a'),
+            "f" => Some('f'),
+            _ => return None,
+        };
+        Some(Self {
+            capability: arch[..digits].parse().ok()?,
+            suffix,
+            options: parts.map(str::to_string).collect(),
+        })
+    }
+
+    /// Whether the code of `other` is valid for this target, and each device
+    /// for this target can run it. An `a` or `f` target covers only itself.
+    fn covers(&self, other: &Self) -> bool {
+        (self.capability, self.suffix) == (other.capability, other.suffix)
+            || (other.suffix.is_none() && self.capability >= other.capability)
+    }
+
+    /// The target of `self` or `other` that covers both, with the options of
+    /// both. `None` if neither covers the other.
+    fn join(&self, other: &Self) -> Option<Self> {
+        let (base, rest) = if self.covers(other) {
+            (self, other)
+        } else if other.covers(self) {
+            (other, self)
+        } else {
+            return None;
+        };
+        let mut joined = base.clone();
+        for option in &rest.options {
+            if !joined.options.contains(option) {
+                joined.options.push(option.clone());
+            }
+        }
+        Some(joined)
+    }
+}
+
+impl std::fmt::Display for PtxTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sm_{}", self.capability)?;
+        if let Some(suffix) = self.suffix {
+            write!(f, "{suffix}")?;
+        }
+        for option in &self.options {
+            write!(f, ", {option}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The facts about all bundles that the merge of each bundle uses.
+#[derive(Default)]
+struct PtxMergeState<'source> {
+    /// The highest `.version` of all bundles.
+    version: Option<PtxVersion>,
+    /// The `.target` that covers the targets of all bundles.
+    target: Option<PtxTarget>,
+    /// The functions that a bundle declares `.extern`.
+    extern_functions: HashSet<&'source str>,
+}
+
+impl<'source> PtxMergeState<'source> {
+    fn new(
+        documents: &[(&str, ptx_parse::Document<'source>)],
+    ) -> Result<Self, EmbeddedModuleError> {
+        let mut state = Self::default();
+        let mut entries = HashMap::new();
+        for (index, (name, document)) in documents.iter().enumerate() {
+            let invalid_ptx = |reason: String| EmbeddedModuleError::InvalidPtx {
+                name: name.to_string(),
+                reason,
+            };
+            for directive in document.directives() {
+                let arguments = directive.arguments();
+                match directive.name() {
+                    ".version" => {
+                        let version = arguments
+                            .split_whitespace()
+                            .next()
+                            .and_then(|value| value.split_once('.'))
+                            .and_then(|(major, minor)| {
+                                Some((major.parse().ok()?, minor.parse().ok()?))
+                            })
+                            .ok_or_else(|| {
+                                invalid_ptx(format!("invalid PTX version `{arguments}`"))
+                            })?;
+                        state.version = state.version.max(Some(version));
+                    }
+                    ".target" => {
+                        let target = PtxTarget::parse(arguments).ok_or_else(|| {
+                            invalid_ptx(format!("invalid PTX target `{arguments}`"))
+                        })?;
+                        let joined = match &state.target {
+                            None => target,
+                            Some(merged) => merged.join(&target).ok_or_else(|| {
+                                EmbeddedModuleError::IncompatibleTarget {
+                                    name: name.to_string(),
+                                    target: target.to_string(),
+                                    merged: merged.to_string(),
+                                }
+                            })?,
+                        };
+                        state.target = Some(joined);
+                    }
+                    _ => {}
+                }
+            }
+            for callable in document.callables() {
+                let defined = callable.definition_scope().is_some();
+                match callable.kind() {
+                    // Explicit device externs keep their link names across bundles.
+                    // Every other helper belongs to the artifact that compiled it.
+                    ptx_parse::CallableKind::Function if callable.is_extern() => {
+                        state.extern_functions.insert(callable.name());
+                    }
+                    ptx_parse::CallableKind::Entry if defined => {
+                        if let Some(first) = entries.insert(callable.name(), index) {
+                            return Err(EmbeddedModuleError::ConflictingEntry {
+                                entry: callable.name().to_string(),
+                                first: documents[first].0.to_string(),
+                                second: name.to_string(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(state)
+    }
+}
+
+/// Strip the headers and shift debug indices past the previous bundles.
 /// Returns the rewritten text and its highest debug file index.
 fn prepare_bundle_body(
-    ptx: &str,
-    strip_headers: bool,
-    file_index_offset: u64,
+    document: &ptx_parse::Document,
     bundle_name: &str,
-    state: &mut PtxMergeState,
+    index: usize,
+    file_index_offset: u64,
+    state: &PtxMergeState,
 ) -> Result<(String, u64), EmbeddedModuleError> {
+    let ptx = document.source();
     let invalid_ptx = |reason: String| EmbeddedModuleError::InvalidPtx {
         name: bundle_name.to_string(),
         reason,
     };
-    let document =
-        ptx_parse::Document::parse(ptx).map_err(|error| invalid_ptx(error.to_string()))?;
-    for callable in document.callables() {
-        if callable.kind() == ptx_parse::CallableKind::Entry
-            && callable.body_span().is_some()
-            && let Some(first) = state
-                .entries
-                .insert(callable.name().to_string(), bundle_name.to_string())
-        {
-            return Err(EmbeddedModuleError::ConflictingEntry {
-                entry: callable.name().to_string(),
-                first,
-                second: bundle_name.to_string(),
-            });
-        }
-    }
     let mut edits = ptx_parse::EditScript::new();
     let mut max_file_index = 0u64;
 
     // Independently compiled artifacts can contain the same device helper and
     // NVVM reflection string. Keep definitions and all references artifact-local
     // without changing kernel entry identities or explicit extern link names.
-    let prefix = format!("cuda_oxide_merge_{}_", state.bundle_index);
+    let prefix = format!("cuda_oxide_merge_{index}_");
     let mut local_symbols = std::collections::BTreeMap::new();
     for callable in document.callables() {
         if callable.kind() == ptx_parse::CallableKind::Function
@@ -354,7 +455,12 @@ fn prepare_bundle_body(
 
     for directive in document.directives() {
         match directive.name() {
-            ".version" | ".target" | ".address_size" if strip_headers => {
+            ".version" | ".target" => {
+                edits
+                    .delete(directive.line_span())
+                    .map_err(|error| invalid_ptx(error.to_string()))?;
+            }
+            ".address_size" if index != 0 => {
                 edits
                     .delete(directive.line_span())
                     .map_err(|error| invalid_ptx(error.to_string()))?;
@@ -685,10 +791,11 @@ mod tests {
         assert_eq!(merged.matches(".extern .func helper()").count(), 2);
     }
 
-    /// The merge is order-explicit: exactly one header set (the first PTX
-    /// bundle's), every body present in iteration order, non-PTX bundles
-    /// skipped. #1277's collision-free-namespace example checks the same
-    /// function under both bundle orders at runtime.
+    /// The merge is order-explicit: exactly one header set (the highest
+    /// `.version`, a `.target` that covers all bundles, the first PTX bundle's
+    /// `.address_size`), every body present in iteration order, non-PTX
+    /// bundles skipped. #1277's collision-free-namespace example checks the
+    /// same function under both bundle orders at runtime.
     #[test]
     fn merges_bundles_in_iteration_order_with_one_header_set() {
         let first = ptx_bundle(
@@ -716,6 +823,77 @@ mod tests {
         ));
     }
 
+    fn target_bundle(name: &str, target: &str) -> OwnedArtifactBundle {
+        ptx_bundle(
+            name,
+            &format!(
+                ".version 8.9\n.target {target}\n.address_size 64\n.visible .entry {name}() {{ ret; }}\n"
+            ),
+        )
+    }
+
+    #[test]
+    fn merge_uses_a_target_that_covers_all_bundles() {
+        for (first, second, expected) in [
+            ("sm_75", "sm_80", "sm_80"),
+            ("sm_80", "sm_90a", "sm_90a"),
+            ("sm_100a", "sm_100a", "sm_100a"),
+            ("sm_80, debug", "sm_86", "sm_86, debug"),
+        ] {
+            let first = target_bundle("first", first);
+            let second = target_bundle("second", second);
+            for bundles in [[&first, &second], [&second, &first]] {
+                let merged = merge_ptx_bundles(bundles).unwrap();
+                let header = format!(".version 8.9\n.target {expected}\n");
+                assert!(merged.starts_with(&header), "{merged}");
+                assert_eq!(merged.matches(".target").count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn merge_rejects_targets_that_no_target_covers() {
+        for (first, second) in [("sm_90a", "sm_100"), ("sm_90a", "sm_100a")] {
+            let first = target_bundle("first", first);
+            let second = target_bundle("second", second);
+            for bundles in [[&first, &second], [&second, &first]] {
+                assert!(matches!(
+                    merge_ptx_bundles(bundles),
+                    Err(EmbeddedModuleError::IncompatibleTarget { .. })
+                ));
+            }
+        }
+        let error = merge_ptx_bundles([
+            &target_bundle("first", "sm_90a"),
+            &target_bundle("second", "sm_100"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "embedded CUDA module 'second' targets `sm_100`, which is not compatible with `sm_90a`"
+        );
+    }
+
+    /// Prepare `ptx` as the bundle at `index`, without other bundles.
+    fn prepare(
+        ptx: &str,
+        index: usize,
+        file_index_offset: u64,
+    ) -> Result<(String, u64), EmbeddedModuleError> {
+        let document =
+            ptx_parse::Document::parse(ptx).map_err(|error| EmbeddedModuleError::InvalidPtx {
+                name: "test".to_string(),
+                reason: error.to_string(),
+            })?;
+        prepare_bundle_body(
+            &document,
+            "test",
+            index,
+            file_index_offset,
+            &PtxMergeState::default(),
+        )
+    }
+
     #[test]
     fn strips_only_structural_ptx_module_headers() {
         let ptx = "\
@@ -725,8 +903,7 @@ mod tests {
 .address_size 64
 .visible .entry kernel() { ret; }
 ";
-        let (body, max_file_index) =
-            prepare_bundle_body(ptx, true, 0, "test", &mut PtxMergeState::default()).unwrap();
+        let (body, max_file_index) = prepare(ptx, 1, 0).unwrap();
         assert_eq!(body, "// .target sm_1\n.visible .entry kernel() { ret; }\n");
         assert_eq!(max_file_index, 0);
     }
@@ -734,8 +911,7 @@ mod tests {
     #[test]
     fn debug_indices_ignore_comments_paths_and_label_substrings() {
         let ptx = ".file /* 90 */ 1 \"source12.rs\"\n.loc /* 80 */ 1 2 3, function_name $inlined_at7, inlined_at /* 70 */ 1 4 5 // inlined_at 60\n";
-        let (body, max_index) =
-            prepare_bundle_body(ptx, false, 3, "test", &mut PtxMergeState::default()).unwrap();
+        let (body, max_index) = prepare(ptx, 0, 3).unwrap();
         assert_eq!(
             body,
             ".file /* 90 */ 4 \"source12.rs\"\n.loc /* 80 */ 4 2 3, function_name $inlined_at7, inlined_at /* 70 */ 4 4 5 // inlined_at 60\n"
@@ -754,22 +930,13 @@ mod tests {
             ".loc 1 2 3, inlined_at -1 4 5\n",
             ".file 18446744073709551616 \"source.rs\"\n",
         ] {
-            assert!(
-                prepare_bundle_body(ptx, false, 1, "test", &mut PtxMergeState::default()).is_err(),
-                "{ptx}"
-            );
+            assert!(prepare(ptx, 0, 1).is_err(), "{ptx}");
         }
         assert!(
-            prepare_bundle_body(
-                ".file 18446744073709551615 \"source.rs\"\n",
-                false,
-                1,
-                "test",
-                &mut PtxMergeState::default()
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("overflow")
+            prepare(".file 18446744073709551615 \"source.rs\"\n", 0, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("overflow")
         );
     }
 

@@ -13,6 +13,7 @@ pub use cuda_core::embedded::{
 };
 use cuda_core::{CudaContext, CudaModule, DriverError};
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -203,8 +204,9 @@ fn load_merged_ptx_bundles(
 /// and examples can check order-dependent merge properties: module-scope
 /// symbol uniqueness and extern alignment must hold for every bundle order,
 /// not just the one the current executable happens to embed (#1277).
-/// Non-extern device helpers and compiler reflection strings are renamed within
-/// their bundle; explicit device extern link names and kernel identities remain.
+/// Module-scope variables without a linkage directive and non-extern device
+/// helpers are renamed within their bundle; explicit device extern link names
+/// and kernel identities remain.
 /// Duplicate kernel definitions, including identical definitions, are rejected
 /// before invoking the driver; typed loaders require an unambiguous entry.
 pub fn merge_ptx_bundles<'a>(
@@ -428,31 +430,7 @@ fn prepare_bundle_body(
     // Independently compiled artifacts can contain the same device helper and
     // NVVM reflection string. Keep definitions and all references artifact-local
     // without changing kernel entry identities or explicit extern link names.
-    let prefix = format!("cuda_oxide_merge_{index}_");
-    let mut local_symbols = std::collections::BTreeMap::new();
-    for callable in document.callables() {
-        if callable.kind() == ptx_parse::CallableKind::Function
-            && callable.body_span().is_some()
-            && !state.extern_functions.contains(callable.name())
-        {
-            local_symbols.insert(callable.name(), format!("{prefix}{}", callable.name()));
-        }
-    }
-    for token in document.tokens() {
-        if token.kind() == ptx_parse::TokenKind::Word && token.text(ptx).starts_with("_$_str") {
-            local_symbols.insert(token.text(ptx), format!("{prefix}{}", token.text(ptx)));
-        }
-    }
-    for token in document.tokens() {
-        if token.kind() == ptx_parse::TokenKind::Word
-            && let Some(replacement) = local_symbols.get(token.text(ptx))
-        {
-            edits
-                .replace(token.span(), replacement)
-                .map_err(|error| invalid_ptx(error.to_string()))?;
-        }
-    }
-
+    let mut local_symbols = HashSet::new();
     for directive in document.directives() {
         match directive.name() {
             ".version" | ".target" => {
@@ -465,15 +443,13 @@ fn prepare_bundle_body(
                     .delete(directive.line_span())
                     .map_err(|error| invalid_ptx(error.to_string()))?;
             }
+            // A module-scope variable without a linkage directive.
+            ".global" | ".const" | ".shared" if directive.scope() == ptx_parse::ScopeId::ROOT => {
+                let arguments = span_tokens(document, directive.arguments_span());
+                local_symbols.extend(declared_variables(ptx, arguments));
+            }
             ".file" | ".loc" => {
-                let span = directive.arguments_span();
-                let tokens = document.tokens();
-                let first = tokens.partition_point(|token| token.span().end <= span.start);
-                let arguments: Vec<_> = tokens[first..]
-                    .iter()
-                    .take_while(|token| token.span().start < span.end)
-                    .filter(|token| !token.kind().is_trivia())
-                    .collect();
+                let arguments: Vec<_> = span_tokens(document, directive.arguments_span()).collect();
                 let index = shift_file_index(
                     &mut edits,
                     ptx,
@@ -500,11 +476,70 @@ fn prepare_bundle_body(
             _ => {}
         }
     }
+    for callable in document.callables() {
+        if callable.kind() == ptx_parse::CallableKind::Function
+            && callable.definition_scope().is_some()
+            && !state.extern_functions.contains(callable.name())
+        {
+            local_symbols.insert(callable.name());
+        }
+    }
+    let prefix = format!("cuda_oxide_merge_{index}_");
+    for token in document.tokens() {
+        let text = token.text(ptx);
+        if token.kind() == ptx_parse::TokenKind::Word && local_symbols.contains(text) {
+            edits
+                .replace(token.span(), format!("{prefix}{text}"))
+                .map_err(|error| invalid_ptx(error.to_string()))?;
+        }
+    }
 
     let body = edits
         .apply(ptx)
         .map_err(|error| invalid_ptx(error.to_string()))?;
     Ok((body, max_file_index))
+}
+
+/// The non-trivia tokens in `span`.
+fn span_tokens<'document>(
+    document: &'document ptx_parse::Document,
+    span: Range<usize>,
+) -> impl Iterator<Item = &'document ptx_parse::Token> {
+    let tokens = document.tokens();
+    let first = tokens.partition_point(|token| token.span().end <= span.start);
+    tokens[first..]
+        .iter()
+        .take_while(move |token| token.span().start < span.end)
+        .filter(|token| !token.kind().is_trivia())
+}
+
+/// The names that the arguments of a variable directive declare, for example
+/// `a` and `b` in `.global .align 4 .b32 a, b[2] = {1, 2};`.
+fn declared_variables<'source, 'document>(
+    ptx: &'source str,
+    arguments: impl Iterator<Item = &'document ptx_parse::Token>,
+) -> Vec<&'source str> {
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+    let mut initializer = false;
+    for token in arguments {
+        let text = token.text(ptx);
+        match text {
+            "[" | "(" | "{" => depth += 1,
+            "]" | ")" | "}" => depth = depth.saturating_sub(1),
+            "=" if depth == 0 => initializer = true,
+            "," if depth == 0 => initializer = false,
+            _ if depth == 0
+                && !initializer
+                && token.kind() == ptx_parse::TokenKind::Word
+                && !text.starts_with(|c: char| c == '.' || c.is_ascii_digit()) =>
+            {
+                names.push(text);
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 /// Shift one complete decimal index token, preserving surrounding PTX.
@@ -892,6 +927,36 @@ mod tests {
             file_index_offset,
             &PtxMergeState::default(),
         )
+    }
+
+    #[test]
+    fn private_variables_are_all_names_of_a_module_scope_declaration() {
+        let ptx = "\
+.global .align 4 .b32 a, b[2] = {1, 2}, c = 3;
+.global .align 8 .u64 table[2] = {generic(a), helper};
+.visible .entry kernel()
+{
+\t.shared .align 4 .b8 inner[4];
+\tld.global.u32 %r1, [c];
+\tret;
+}
+.func helper() { ret; }
+";
+        let (body, _) = prepare(ptx, 0, 0).unwrap();
+        assert_eq!(
+            body,
+            "\
+.global .align 4 .b32 cuda_oxide_merge_0_a, cuda_oxide_merge_0_b[2] = {1, 2}, cuda_oxide_merge_0_c = 3;
+.global .align 8 .u64 cuda_oxide_merge_0_table[2] = {generic(cuda_oxide_merge_0_a), cuda_oxide_merge_0_helper};
+.visible .entry kernel()
+{
+\t.shared .align 4 .b8 inner[4];
+\tld.global.u32 %r1, [cuda_oxide_merge_0_c];
+\tret;
+}
+.func cuda_oxide_merge_0_helper() { ret; }
+"
+        );
     }
 
     #[test]

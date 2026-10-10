@@ -31,9 +31,9 @@ mod kernels {
             if lane.is_multiple_of(7) {
                 return;
             }
-            for c in 0..D.div_ceil(32) {
+            for (c, sum) in state[..D.div_ceil(32)].iter_mut().enumerate() {
                 for row in 0..4 {
-                    state[c] += a.load(row, lane + c * 32) + b.load(row, lane + c * 32);
+                    *sum += a.load(row, lane + c * 32) + b.load(row, lane + c * 32);
                 }
             }
         };
@@ -63,9 +63,9 @@ mod kernels {
                     a: BlockTile<'_, f32>,
                     b: BlockTile<'_, f32>| {
             let lane = thread::threadIdx_x() as usize % 32;
-            for c in 0..D / 32 {
+            for (c, sum) in state[..D / 32].iter_mut().enumerate() {
                 for row in 0..R + 1 {
-                    state[c] += a.load(row, lane + c * 32) + b.load(row, lane + c * 32);
+                    *sum += a.load(row, lane + c * 32) + b.load(row, lane + c * 32);
                 }
             }
         };

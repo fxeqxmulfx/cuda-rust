@@ -276,6 +276,7 @@ compiles a Rust kernel to PTX, launches it on the GPU, and prints
 | `ord_cmp`            | Device-side `Ord::cmp` lowering for signed and unsigned integers         |
 | `gemm_sol_final`     | Canonical Blackwell GEMM SoL: size-specialized CLC + cg2 + vector stores |
 | `gemm_sol`           | Historical GEMM kernel progression and comparison kernels                |
+| `gemm_compare`       | Ampere BF16 GEMM: naive, shared-memory, Tensor Cores versus live cuBLAS   |
 | `tcgen05`            | Blackwell tensor cores (sm_100a): TMEM, MMA, cta_group::2                |
 | `atomics`            | GPU atomics: 6 types x 3 scopes x 5 orderings (20 tests)                 |
 | `atomic_f16`         | Scalar f16 atomics: per-scope correctness checks + f32 vs f16 bench      |

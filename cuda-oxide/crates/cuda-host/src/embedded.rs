@@ -351,7 +351,7 @@ fn merge_ptx_documents<'source>(
         return Err(EmbeddedModuleError::NoModules);
     }
 
-    let state = PtxMergeState::new(documents)?;
+    let mut state = PtxMergeState::new(documents)?;
     // Later bundles may use instructions introduced after the ISA version or
     // target of the first bundle. One header covers all bundles in every order.
     let mut merged = String::new();
@@ -364,7 +364,7 @@ fn merge_ptx_documents<'source>(
     let mut file_index_offset = 0;
     let mut debug_sections: Vec<(&str, Vec<String>)> = Vec::new();
     for (index, (name, document)) in documents.iter().enumerate() {
-        let bundle = prepare_bundle_body(document, name, index, file_index_offset, &state)?;
+        let bundle = prepare_bundle_body(document, name, index, file_index_offset, &mut state)?;
         file_index_offset = file_index_offset.max(bundle.max_file_index);
         merged.push_str(&bundle.body);
         if !bundle.body.ends_with('\n') {
@@ -581,7 +581,7 @@ fn prepare_bundle_body<'source>(
     bundle_name: &str,
     index: usize,
     file_index_offset: u64,
-    state: &PtxMergeState<'source>,
+    state: &mut PtxMergeState<'source>,
 ) -> Result<PreparedBundle<'source>, EmbeddedModuleError> {
     let ptx = document.source();
     let invalid_ptx = |reason: String| EmbeddedModuleError::InvalidPtx {
@@ -599,13 +599,12 @@ fn prepare_bundle_body<'source>(
     // The bundle keeps its DWARF sections if the merge keeps its compile
     // units. Each bundle keeps `.debug_str`, which has the function names of
     // its `.loc` directives.
-    let units = state.dwarf.units(index).and_then(|units| {
-        let replacements = units.replacements(file_index_offset)?;
-        Some((units, replacements))
-    });
+    let replacements = state.dwarf.replacements(index, file_index_offset);
     let mut kept_sections = Vec::new();
     for section in dwarf::sections(document) {
-        if (units.is_some() && state.dwarf.keeps(section.name)) || section.name == ".debug_str" {
+        if (replacements.is_some() && state.dwarf.keeps(section.name))
+            || section.name == ".debug_str"
+        {
             local_symbols.extend(
                 document
                     .labels_in(section.body.clone())
@@ -619,8 +618,8 @@ fn prepare_bundle_body<'source>(
             removed.push(section.span);
         }
     }
-    if let Some((units, replacements)) = &units {
-        local_symbols.extend(units.names());
+    if let Some(replacements) = &replacements {
+        local_symbols.extend(state.dwarf.names(index));
         for (span, text) in replacements {
             edits
                 .replace(span.clone(), text.as_str())
@@ -632,7 +631,7 @@ fn prepare_bundle_body<'source>(
             && state.repeated_entries.contains(&(index, callable.name()))
         {
             // The DWARF sections refer to the labels of the entry.
-            if units.is_some() {
+            if replacements.is_some() {
                 local_symbols.insert(callable.name());
             } else {
                 let span = callable.span();
@@ -1511,6 +1510,62 @@ cuda_oxide_merge_2_$L__info_string0:
         );
     }
 
+    #[test]
+    fn moves_the_dwarf_entries_after_values_that_change_size() {
+        // The first bundle has 127 declarations and file 300.
+        let declarations: String = (1..=127)
+            .map(|tag| format!(".b8 {tag}, {tag}, 0, 0, 0\n"))
+            .collect();
+        let first = ptx_bundle(
+            "first",
+            &format!(
+                ".version 8.9\n.target sm_90, debug\n.address_size 64\n.file 300 \"first.rs\"\n.visible .entry first() {{ ret; }}\n\t.section\t.debug_abbrev\n\t{{\n{declarations}.b8 0\n\t}}\n\t.section\t.debug_info\n\t{{\n\t}}\n"
+            ),
+        );
+        // A compile unit with code 1, and a subprogram with code 2, file 1
+        // and a reference to the base type with code 200. The merged table
+        // gives codes 128 and 129 to the compile unit and the subprogram,
+        // and code 36 to the base type. File 301 does not fit in a byte.
+        let second = dwarf_bundle(
+            "second",
+            "",
+            "\t.section\t.debug_abbrev\n\t{\n.b8 1, 17, 1, 16, 6, 0, 0\n.b8 2, 46, 0, 17, 1, 58, 11, 73, 19, 0, 0\n.b8 200, 1, 36, 0, 0, 0\n.b8 0\n\t}\n\t.section\t.debug_info\n\t{\n.b32 29\n.b8 2, 0\n.b32 .debug_abbrev\n.b8 8\n.b8 1\n.b32 .debug_line\n.b8 2\n.b64 $L__func_begin0\n.b8 1\n.b32 30\n.b8 200\n.b8 1\n.b8 0\n\t}\n",
+        );
+        let merged = merge_ptx_bundles([&first, &second]).unwrap();
+        let section = |name: &str| {
+            let start = merged.find(&format!("\t.section\t{name}\n\t{{\n")).unwrap();
+            let body = &merged[start..];
+            let body = &body[body.find("{\n").unwrap() + 2..];
+            body[..body.find("\t}\n").unwrap()].to_string()
+        };
+
+        let mut abbrev: Vec<u8> = (1..=127).flat_map(|tag| [tag, tag, 0, 0, 0]).collect();
+        abbrev.extend([128, 1, 17, 1, 16, 6, 0, 0]);
+        // The subprogram gets the form DW_FORM_data2 for the file.
+        abbrev.extend([129, 1, 46, 0, 17, 1, 58, 5, 73, 19, 0, 0, 0]);
+        let abbrev: String = abbrev.iter().map(|byte| format!(".b8 {byte}\n")).collect();
+        assert_eq!(section(".debug_abbrev"), abbrev);
+        // The unit length and the reference to the base type change.
+        assert_eq!(
+            section(".debug_info"),
+            "\
+.b32 31
+.b8 2, 0
+.b32 .debug_abbrev
+.b8 8
+.b8 128, 1
+.b32 .debug_line
+.b8 129, 1
+.b64 cuda_oxide_merge_1_$L__func_begin0
+.b8 45, 1
+.b32 33
+.b8 36
+
+.b8 0
+"
+        );
+    }
+
     /// Prepare `ptx` as the bundle at `index`, without other bundles.
     fn prepare(
         ptx: &str,
@@ -1527,7 +1582,7 @@ cuda_oxide_merge_2_$L__info_string0:
             "test",
             index,
             file_index_offset,
-            &PtxMergeState::default(),
+            &mut PtxMergeState::default(),
         )
         .map(|bundle| (bundle.body, bundle.max_file_index))
     }

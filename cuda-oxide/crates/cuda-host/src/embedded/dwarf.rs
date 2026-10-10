@@ -11,17 +11,22 @@
 //! table with the declarations of all bundles, and one `.debug_info` section
 //! with the compile units of all bundles. In each compile unit, the merge
 //! changes the abbreviation codes to the codes of the merged table. It also
-//! adds the file index offset of the bundle to the file attributes.
+//! adds the file index offset of the bundle to the file attributes. If a file
+//! index does not fit in the form of its attribute, the attribute gets a
+//! larger form. If a value changes size, the merge changes the unit length
+//! and the references to the entries after the value.
 //!
 //! The merge supports the DWARF that LLVM writes for PTX: 32-bit DWARF 2 to
 //! 4 that refers to labels, and to `.debug_abbrev` and `.debug_line` at
-//! offset 0. The merged module does not have the name tables
-//! `.debug_pubnames` and `.debug_pubtypes`, which LLVM 21 writes. If the
-//! merge does not support the DWARF of the first bundle with DWARF sections,
-//! only that bundle keeps them, as they are. Another bundle with DWARF that
-//! the merge does not support keeps only its line information.
+//! offset 0. In DWARF 3 and 4, location expressions can refer to entries.
+//! Thus the merge changes the size of values only in DWARF 2. The merged
+//! module does not have the name tables `.debug_pubnames` and
+//! `.debug_pubtypes`, which LLVM 21 writes. If the merge does not support the
+//! DWARF of the first bundle with DWARF sections, only that bundle keeps
+//! them, as they are. Another bundle with DWARF that the merge does not
+//! support keeps only its line information.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::ops::Range;
 
@@ -57,13 +62,16 @@ const DW_FORM_EXPRLOC: u64 = 0x18;
 const DW_FORM_FLAG_PRESENT: u64 = 0x19;
 const DW_FORM_REF_SIG8: u64 = 0x20;
 
-/// Values in a section, by section range, each with a number: a new code or a
-/// form.
-type Fields = Vec<(Range<usize>, u64)>;
+/// The data forms and their sizes, from the smallest.
+const DATA_FORMS: [(usize, u64); 4] = [
+    (1, DW_FORM_DATA1),
+    (2, DW_FORM_DATA2),
+    (4, DW_FORM_DATA4),
+    (8, DW_FORM_DATA8),
+];
 
-/// The new code and the attributes and forms of each abbreviation code of a
-/// bundle.
-type Codes<'declarations> = HashMap<u64, (u64, &'declarations [(u64, u64)])>;
+/// Section ranges, in order, and their new bytes.
+type Patches = Vec<(Range<usize>, Vec<u8>)>;
 
 /// A DWARF section of a bundle.
 pub(super) struct Section<'source> {
@@ -138,7 +146,7 @@ impl<'source> DwarfMerge<'source> {
         if sections.is_empty() || self.unchanged {
             return;
         }
-        match self.read(document, &sections) {
+        match Units::read(document, &sections) {
             Some(units) => {
                 self.units.insert(index, units);
             }
@@ -151,10 +159,96 @@ impl<'source> DwarfMerge<'source> {
         }
     }
 
-    /// The compile units of the bundle at `index`, if it keeps its DWARF
+    /// The new text of the `.debug_info` values of the bundle at `index`: the
+    /// codes of the merged table, the file indices plus `file_index_offset`,
+    /// and the offsets that change. The merged table gets the declarations
+    /// that the bundle adds. `None` if the bundle does not keep its DWARF
     /// sections.
-    pub(super) fn units(&self, index: usize) -> Option<&Units<'source>> {
-        self.units.get(&index)
+    pub(super) fn replacements(
+        &mut self,
+        index: usize,
+        file_index_offset: u64,
+    ) -> Option<Vec<(Range<usize>, String)>> {
+        let units = self.units.get(&index)?;
+        let info = &units.info;
+        // The new index of a file attribute. File index 0 is no file.
+        let file_index = |field: &Range<usize>, form: u64| {
+            let index = info.number(field, form == DW_FORM_UDATA)?;
+            if index == 0 {
+                Some(0)
+            } else {
+                index.checked_add(file_index_offset)
+            }
+        };
+
+        // A file attribute gets the smallest data form that has the indices
+        // of all its entries, as LLVM selects the form.
+        let mut forms: Vec<Vec<u64>> = units
+            .declarations
+            .iter()
+            .map(|declaration| {
+                declaration
+                    .attributes
+                    .iter()
+                    .map(|&(_, form)| form)
+                    .collect()
+            })
+            .collect();
+        for (field, kind) in units.units.iter().flat_map(|unit| &unit.fields) {
+            if let Field::File(declaration, attribute) = *kind {
+                let form = &mut forms[declaration][attribute];
+                let index = file_index(field, *form)?;
+                if let Some(current) = DATA_FORMS.iter().position(|&(_, data)| data == *form) {
+                    let fits = DATA_FORMS
+                        .iter()
+                        .position(|&(size, _)| size == 8 || index >> (8 * size) == 0)?;
+                    *form = DATA_FORMS[current.max(fits)].1;
+                }
+            }
+        }
+
+        // Each declaration that the merged table does not have gets the next
+        // code.
+        let mut added: Vec<Vec<u8>> = Vec::new();
+        let codes: Vec<u64> = units
+            .declarations
+            .iter()
+            .zip(&forms)
+            .map(|(declaration, forms)| {
+                let bytes = declaration.bytes(forms);
+                if let Some(&code) = self.codes.get(&bytes) {
+                    return code;
+                }
+                let position = match added.iter().position(|added| *added == bytes) {
+                    Some(position) => position,
+                    None => {
+                        added.push(bytes);
+                        added.len() - 1
+                    }
+                };
+                (self.declarations.len() + position + 1) as u64
+            })
+            .collect();
+
+        let mut patches = Vec::new();
+        for unit in &units.units {
+            patches.extend(unit.patches(info, &codes, &forms, file_index)?);
+        }
+        let replacements = info.rewrite(&patches)?;
+        for bytes in added {
+            self.declarations.push(bytes.clone());
+            self.codes.insert(bytes, self.declarations.len() as u64);
+        }
+        Some(replacements)
+    }
+
+    /// The names that the compile units of the bundle at `index` refer to
+    /// and that the bundle defines in a callable. The merge renames them in
+    /// each bundle.
+    pub(super) fn names(&self, index: usize) -> &[&'source str] {
+        self.units
+            .get(&index)
+            .map_or(&[], |units| units.names.as_slice())
     }
 
     /// Whether a bundle that keeps its DWARF sections keeps the section
@@ -162,81 +256,6 @@ impl<'source> DwarfMerge<'source> {
     /// which the merge changes.
     pub(super) fn keeps(&self, name: &str) -> bool {
         self.unchanged || !matches!(name, ".debug_pubnames" | ".debug_pubtypes")
-    }
-
-    fn read(
-        &mut self,
-        document: &Document<'source>,
-        sections: &[Section<'source>],
-    ) -> Option<Units<'source>> {
-        let mut abbrev = SectionData::new(document.source());
-        let mut info = SectionData::new(document.source());
-        for section in sections {
-            let scope = section.scope?;
-            match section.name {
-                ".debug_abbrev" => abbrev.read(document, scope)?,
-                ".debug_info" => info.read(document, scope)?,
-                // `.loc` directives refer to the strings with labels.
-                ".debug_str" => {}
-                // The merged module does not have them.
-                ".debug_pubnames" | ".debug_pubtypes" => {}
-                // The merge cannot find the references to other sections.
-                _ if document.statements_in_scope(scope).next().is_some() => return None,
-                _ => {}
-            }
-        }
-        let declarations = if abbrev.bytes.is_empty() {
-            Vec::new()
-        } else {
-            declarations(&abbrev)?
-        };
-
-        // Each declaration that the merged table does not have gets the next
-        // code.
-        let mut added: Vec<&[u8]> = Vec::new();
-        let mut codes = HashMap::new();
-        for (code, declaration) in &declarations {
-            let new_code = match self.codes.get(&declaration.bytes) {
-                Some(&new_code) => new_code,
-                None => {
-                    let position = match added.iter().position(|&bytes| bytes == declaration.bytes)
-                    {
-                        Some(position) => position,
-                        None => {
-                            added.push(&declaration.bytes);
-                            added.len() - 1
-                        }
-                    };
-                    (self.declarations.len() + position + 1) as u64
-                }
-            };
-            if codes
-                .insert(*code, (new_code, declaration.attributes.as_slice()))
-                .is_some()
-            {
-                return None;
-            }
-        }
-        let (changed_codes, files) = walk(&info, &codes)?;
-        for bytes in added {
-            self.declarations.push(bytes.to_vec());
-            self.codes
-                .insert(bytes.to_vec(), self.declarations.len() as u64);
-        }
-
-        let private = private_names(document);
-        let names = info
-            .names
-            .iter()
-            .copied()
-            .filter(|name| private.contains(name))
-            .collect();
-        Some(Units {
-            info,
-            codes: changed_codes,
-            files,
-            names,
-        })
     }
 
     /// Write the DWARF sections of the merged module. `sections` has the
@@ -271,16 +290,67 @@ impl<'source> DwarfMerge<'source> {
 /// The compile units of a bundle.
 pub(super) struct Units<'source> {
     info: SectionData<'source>,
-    /// The abbreviation codes that change, and their new codes.
-    codes: Fields,
-    /// The file attributes and their forms.
-    files: Fields,
+    /// The declarations of the abbreviation table of the bundle.
+    declarations: Vec<Declaration>,
+    units: Vec<Unit>,
     /// The names that the units refer to and that the bundle defines in a
     /// callable.
     names: Vec<&'source str>,
 }
 
 impl<'source> Units<'source> {
+    /// The compile units in the DWARF `sections` of `document`. `None` if the
+    /// merge does not support them.
+    fn read(document: &Document<'source>, sections: &[Section<'source>]) -> Option<Self> {
+        let mut abbrev = SectionData::new(document.source());
+        let mut info = SectionData::new(document.source());
+        for section in sections {
+            let scope = section.scope?;
+            match section.name {
+                ".debug_abbrev" => abbrev.read(document, scope)?,
+                ".debug_info" => info.read(document, scope)?,
+                // `.loc` directives refer to the strings with labels.
+                ".debug_str" => {}
+                // The merged module does not have them.
+                ".debug_pubnames" | ".debug_pubtypes" => {}
+                // The merge cannot find the references to other sections.
+                _ if document.statements_in_scope(scope).next().is_some() => return None,
+                _ => {}
+            }
+        }
+        let declarations = if abbrev.bytes.is_empty() {
+            Vec::new()
+        } else {
+            declarations(&abbrev)?
+        };
+        // The index of the declaration of each code.
+        let mut codes = HashMap::new();
+        for (index, (code, _)) in declarations.iter().enumerate() {
+            if codes.insert(*code, index).is_some() {
+                return None;
+            }
+        }
+        let declarations: Vec<_> = declarations
+            .into_iter()
+            .map(|(_, declaration)| declaration)
+            .collect();
+        let units = walk(&info, &codes, &declarations)?;
+
+        let private = private_names(document);
+        let names = info
+            .names
+            .iter()
+            .copied()
+            .filter(|name| private.contains(name))
+            .collect();
+        Some(Self {
+            info,
+            declarations,
+            units,
+            names,
+        })
+    }
+
     /// The units of a bundle that keeps its DWARF `sections` as they are.
     fn unchanged(document: &Document<'source>, sections: &[Section<'source>]) -> Self {
         let private = private_names(document);
@@ -292,67 +362,128 @@ impl<'source> Units<'source> {
             .collect();
         Self {
             info: SectionData::new(document.source()),
-            codes: Vec::new(),
-            files: Vec::new(),
+            declarations: Vec::new(),
+            units: Vec::new(),
             names,
         }
     }
+}
 
-    /// The new text of the `.debug_info` values: the codes of the merged
-    /// table, and the file indices plus `file_index_offset`. `None` if a file
-    /// index does not fit in its value.
-    pub(super) fn replacements(
+/// A compile unit.
+struct Unit {
+    /// The section range of the unit.
+    range: Range<usize>,
+    version: u64,
+    /// The values that the merge can change, in order.
+    fields: Vec<(Range<usize>, Field)>,
+}
+
+/// A value in a compile unit that the merge can change.
+enum Field {
+    /// The abbreviation code of an entry, with the index of its declaration.
+    Code(usize),
+    /// A file attribute, with the indices of its declaration and attribute.
+    File(usize, usize),
+    /// A reference to an entry, with its form.
+    Reference(u64),
+}
+
+impl Unit {
+    /// The new bytes of the values of the unit: the `codes` of the
+    /// declarations, and the file indices from `file_index` in the `forms`
+    /// of the declarations. If a value changes size, also the unit length
+    /// and the references. `None` if a value does not fit.
+    fn patches(
         &self,
-        file_index_offset: u64,
-    ) -> Option<Vec<(Range<usize>, String)>> {
-        let mut numbers = BTreeMap::new();
-        for (field, code) in &self.codes {
-            self.info.write(&mut numbers, field.start, &uleb128(*code));
-        }
-        for (field, form) in &self.files {
-            let mut reader = Reader {
-                bytes: &self.info.bytes[..field.end],
-                position: field.start,
+        info: &SectionData,
+        codes: &[u64],
+        forms: &[Vec<u64>],
+        file_index: impl Fn(&Range<usize>, u64) -> Option<u64>,
+    ) -> Option<Patches> {
+        let mut patches = Vec::new();
+        for (field, kind) in &self.fields {
+            let bytes = match *kind {
+                Field::Code(declaration) => uleb128(codes[declaration]),
+                Field::File(declaration, attribute) => {
+                    let form = forms[declaration][attribute];
+                    let index = file_index(field, form)?;
+                    match DATA_FORMS.iter().find(|&&(_, data)| data == form) {
+                        Some(&(size, _)) => le_bytes(index, size)?,
+                        None => uleb128(index),
+                    }
+                }
+                Field::Reference(_) => continue,
             };
-            let index = if *form == DW_FORM_UDATA {
-                reader.uleb128()?
-            } else {
-                reader.number(field.len())?
-            };
-            // File index 0 is no file.
-            if index == 0 || file_index_offset == 0 {
-                continue;
+            if !info.bytes[field.clone()]
+                .iter()
+                .copied()
+                .eq(bytes.iter().copied().map(Some))
+            {
+                patches.push((field.clone(), bytes));
             }
-            let index = index.checked_add(file_index_offset)?;
-            // The value keeps its size, thus the offsets of the next values
-            // do not change.
-            let bytes = if *form == DW_FORM_UDATA {
-                Some(uleb128(index)).filter(|bytes| bytes.len() == field.len())
-            } else {
-                (field.len() == 8 || index >> (8 * field.len()) == 0)
-                    .then(|| index.to_le_bytes()[..field.len()].to_vec())
-            }?;
-            self.info.write(&mut numbers, field.start, &bytes);
         }
-        Some(
-            numbers
-                .into_iter()
-                .filter(|&(value, number)| number != self.info.number(value))
-                .map(|(value, number)| (self.info.spans[value].clone(), number.to_string()))
-                .collect(),
-        )
-    }
+        if patches
+            .iter()
+            .all(|(field, bytes)| field.len() == bytes.len())
+        {
+            return Some(patches);
+        }
+        // In DWARF 3 and 4, location expressions can refer to entries.
+        if self.version != 2 {
+            return None;
+        }
 
-    /// The names that the compile units refer to and that the bundle defines
-    /// in a callable. The merge renames them in each bundle.
-    pub(super) fn names(&self) -> &[&'source str] {
-        &self.names
+        // The change of the offsets after each new value.
+        let mut change = 0;
+        let changes: Vec<(usize, i64)> = patches
+            .iter()
+            .map(|(field, bytes)| {
+                change += bytes.len() as i64 - field.len() as i64;
+                (field.end, change)
+            })
+            .collect();
+        // The new unit offset of a unit offset.
+        let moved = |offset: u64| {
+            let position = self
+                .range
+                .start
+                .checked_add(usize::try_from(offset).ok()?)?;
+            let count = changes.partition_point(|&(end, _)| end <= position);
+            offset.checked_add_signed(count.checked_sub(1).map_or(0, |last| changes[last].1))
+        };
+        for (field, kind) in &self.fields {
+            let Field::Reference(form) = *kind else {
+                continue;
+            };
+            let udata = form == DW_FORM_REF_UDATA;
+            let offset = info.number(field, udata)?;
+            let new_offset = moved(offset)?;
+            // The reference keeps its size, thus the offsets do not change
+            // again.
+            let bytes = if udata {
+                Some(uleb128(new_offset)).filter(|bytes| bytes.len() == field.len())
+            } else {
+                le_bytes(new_offset, field.len())
+            }?;
+            if new_offset != offset {
+                patches.push((field.clone(), bytes));
+            }
+        }
+        // 32-bit DWARF only.
+        let length = moved(self.range.len() as u64)?
+            .checked_sub(4)
+            .filter(|&length| length < 0xffff_fff0)?;
+        patches.push((self.range.start..self.range.start + 4, le_bytes(length, 4)?));
+        patches.sort_by_key(|(field, _)| field.start);
+        Some(patches)
     }
 }
 
 /// The values of the data directives in the DWARF sections with one name.
 struct SectionData<'source> {
     source: &'source str,
+    /// The data directives.
+    directives: Vec<Data>,
     /// The source spans of the values.
     spans: Vec<Range<usize>>,
     /// The section offset of each value.
@@ -363,10 +494,23 @@ struct SectionData<'source> {
     names: Vec<&'source str>,
 }
 
+/// A data directive.
+struct Data {
+    /// The source span of the directive.
+    span: Range<usize>,
+    /// The source span of the values.
+    arguments: Range<usize>,
+    /// The size of each value.
+    size: usize,
+    /// The section range of the values.
+    bytes: Range<usize>,
+}
+
 impl<'source> SectionData<'source> {
     fn new(source: &'source str) -> Self {
         Self {
             source,
+            directives: Vec::new(),
             spans: Vec::new(),
             offsets: Vec::new(),
             bytes: Vec::new(),
@@ -400,9 +544,16 @@ impl<'source> SectionData<'source> {
                 return None;
             }
             let tokens: Vec<_> = span_tokens(document, directive.arguments_span()).collect();
+            let start = self.bytes.len();
             for value in tokens.split(|token| token.text(self.source) == ",") {
                 self.push(value, size)?;
             }
+            self.directives.push(Data {
+                span: directive.span(),
+                arguments: directive.arguments_span(),
+                size,
+                bytes: start..self.bytes.len(),
+            });
         }
         Some(())
     }
@@ -443,28 +594,74 @@ impl<'source> SectionData<'source> {
         Some(())
     }
 
-    /// The number of the value at `index`. Its bytes are numbers.
-    fn number(&self, index: usize) -> u64 {
-        let end = self
-            .offsets
-            .get(index + 1)
-            .copied()
-            .unwrap_or(self.bytes.len());
-        self.bytes[self.offsets[index]..end]
-            .iter()
-            .rev()
-            .fold(0, |number, byte| number << 8 | u64::from(byte.unwrap_or(0)))
+    /// The number in the section range `field`: a ULEB128 number, or a
+    /// little-endian number of the size of the range.
+    fn number(&self, field: &Range<usize>, uleb: bool) -> Option<u64> {
+        let mut reader = Reader {
+            bytes: &self.bytes[..field.end],
+            position: field.start,
+        };
+        if uleb {
+            reader.uleb128()
+        } else {
+            reader.number(field.len())
+        }
     }
 
-    /// Put `bytes` at section `offset` into `numbers`, the new numbers of the
-    /// values.
-    fn write(&self, numbers: &mut BTreeMap<usize, u64>, offset: usize, bytes: &[u8]) {
-        for (position, &byte) in (offset..).zip(bytes) {
-            let value = self.offsets.partition_point(|&start| start <= position) - 1;
-            let shift = 8 * (position - self.offsets[value]);
-            let number = numbers.entry(value).or_insert_with(|| self.number(value));
-            *number = *number & !(0xff_u64 << shift) | u64::from(byte) << shift;
+    /// The new text of the data directives with the bytes of `patches`. A
+    /// directive gets the new bytes of a range that starts in it, and loses
+    /// the other bytes of the range. `None` if a directive cannot have its
+    /// new bytes.
+    fn rewrite(&self, patches: &Patches) -> Option<Vec<(Range<usize>, String)>> {
+        let mut replacements = Vec::new();
+        let mut next = 0;
+        for data in &self.directives {
+            let mut bytes = Vec::new();
+            let mut changed = false;
+            let mut position = data.bytes.start;
+            while position < data.bytes.end {
+                match patches.get(next) {
+                    Some((field, new)) if field.start <= position => {
+                        if field.start >= data.bytes.start {
+                            bytes.extend(new.iter().copied().map(Some));
+                        }
+                        changed = true;
+                        position = field.end;
+                        if field.end <= data.bytes.end {
+                            next += 1;
+                        }
+                    }
+                    _ => {
+                        bytes.push(self.bytes[position]);
+                        position += 1;
+                    }
+                }
+            }
+            if !changed {
+                continue;
+            }
+            // Only the values that are numbers change.
+            let bytes: Vec<u8> = bytes.into_iter().collect::<Option<_>>()?;
+            if !bytes.len().is_multiple_of(data.size) {
+                return None;
+            }
+            let values: Vec<String> = bytes
+                .chunks(data.size)
+                .map(|value| {
+                    let number = value
+                        .iter()
+                        .rev()
+                        .fold(0, |number, &byte| number << 8 | u64::from(byte));
+                    number.to_string()
+                })
+                .collect();
+            replacements.push(if values.is_empty() {
+                (data.span.clone(), String::new())
+            } else {
+                (data.arguments.clone(), values.join(", "))
+            });
         }
+        Some(replacements)
     }
 
     /// Whether the 4 bytes at `offset` are the offset of the first
@@ -490,11 +687,25 @@ impl<'source> SectionData<'source> {
 
 /// An abbreviation declaration.
 struct Declaration {
-    /// The bytes after the code: the tag, the children flag and the
-    /// attribute specifications.
-    bytes: Vec<u8>,
+    tag: u64,
+    children: u8,
     /// The attributes and their forms.
     attributes: Vec<(u64, u64)>,
+}
+
+impl Declaration {
+    /// The bytes after the code, with `forms` as the forms of the
+    /// attributes.
+    fn bytes(&self, forms: &[u64]) -> Vec<u8> {
+        let mut bytes = uleb128(self.tag);
+        bytes.push(self.children);
+        for (&(attribute, _), &form) in self.attributes.iter().zip(forms) {
+            bytes.extend(uleb128(attribute));
+            bytes.extend(uleb128(form));
+        }
+        bytes.extend([0, 0]);
+        bytes
+    }
 }
 
 /// The declarations of the abbreviation table in `abbrev`, with their codes.
@@ -510,10 +721,8 @@ fn declarations(abbrev: &SectionData) -> Option<Vec<(u64, Declaration)>> {
         if code == 0 {
             break;
         }
-        let start = reader.position;
-        // The tag and the children flag.
-        reader.uleb128()?;
-        reader.byte()?;
+        let tag = reader.uleb128()?;
+        let children = reader.byte()?;
         let mut attributes = Vec::new();
         loop {
             let attribute = reader.uleb128()?;
@@ -528,21 +737,26 @@ fn declarations(abbrev: &SectionData) -> Option<Vec<(u64, Declaration)>> {
             }
             attributes.push((attribute, form));
         }
-        let bytes = abbrev.bytes[start..reader.position]
-            .iter()
-            .flatten()
-            .copied()
-            .collect();
-        declarations.push((code, Declaration { bytes, attributes }));
+        declarations.push((
+            code,
+            Declaration {
+                tag,
+                children,
+                attributes,
+            },
+        ));
     }
     (reader.position == abbrev.bytes.len()).then_some(declarations)
 }
 
-/// The abbreviation codes that change and the file attributes in the
-/// compile units of `info`. `None` if the merge does not support the units.
-fn walk(info: &SectionData, codes: &Codes) -> Option<(Fields, Fields)> {
-    let mut changed_codes = Vec::new();
-    let mut files = Vec::new();
+/// The compile units of `info`. `codes` has the index in `declarations` of
+/// each abbreviation code. `None` if the merge does not support the units.
+fn walk(
+    info: &SectionData,
+    codes: &HashMap<u64, usize>,
+    declarations: &[Declaration],
+) -> Option<Vec<Unit>> {
+    let mut units = Vec::new();
     let mut offset = 0;
     while offset < info.bytes.len() {
         let mut header = Reader {
@@ -568,6 +782,7 @@ fn walk(info: &SectionData, codes: &Codes) -> Option<(Fields, Fields)> {
             bytes: &info.bytes[..end],
             position: header.position,
         };
+        let mut fields = Vec::new();
         while unit.position < end {
             let start = unit.position;
             let code = unit.uleb128()?;
@@ -575,25 +790,27 @@ fn walk(info: &SectionData, codes: &Codes) -> Option<(Fields, Fields)> {
             if code == 0 {
                 continue;
             }
-            let &(new_code, attributes) = codes.get(&code)?;
-            // The offsets of the next values must not change.
-            if uleb128(new_code).len() != unit.position - start {
-                return None;
-            }
-            if new_code != code {
-                changed_codes.push((start..unit.position, new_code));
-            }
-            for &(attribute, form) in attributes {
-                let field = unit.position;
+            let &declaration = codes.get(&code)?;
+            fields.push((start..unit.position, Field::Code(declaration)));
+            for (index, &(attribute, form)) in
+                declarations[declaration].attributes.iter().enumerate()
+            {
+                let value = unit.position;
                 unit.skip_value(form, version, address_size)?;
-                let number = info.bytes[field..unit.position].iter().all(Option::is_some);
+                let field = value..unit.position;
+                let number = info.bytes[field.clone()].iter().all(Option::is_some);
                 match (attribute, form) {
                     (
                         DW_AT_DECL_FILE | DW_AT_CALL_FILE,
                         DW_FORM_DATA1 | DW_FORM_DATA2 | DW_FORM_DATA4 | DW_FORM_DATA8
                         | DW_FORM_UDATA,
-                    ) if number => files.push((field..unit.position, form)),
+                    ) if number => fields.push((field, Field::File(declaration, index))),
                     (DW_AT_DECL_FILE | DW_AT_CALL_FILE, _) => return None,
+                    (
+                        _,
+                        DW_FORM_REF1 | DW_FORM_REF2 | DW_FORM_REF4 | DW_FORM_REF8
+                        | DW_FORM_REF_UDATA,
+                    ) => fields.push((field, Field::Reference(form))),
                     // The merge puts the sections of earlier bundles before
                     // this offset.
                     (_, DW_FORM_STRP | DW_FORM_REF_ADDR | DW_FORM_SEC_OFFSET) if number => {
@@ -603,9 +820,14 @@ fn walk(info: &SectionData, codes: &Codes) -> Option<(Fields, Fields)> {
                 }
             }
         }
+        units.push(Unit {
+            range: offset..end,
+            version,
+            fields,
+        });
         offset = end;
     }
-    Some((changed_codes, files))
+    Some(units)
 }
 
 /// Whether [`Reader::skip_value`] can read values of `form`.
@@ -727,6 +949,12 @@ fn uleb128(mut number: u64) -> Vec<u8> {
         }
         bytes.push(byte | 0x80);
     }
+}
+
+/// `number` as a little-endian number of `size` bytes. `None` if it does not
+/// fit.
+fn le_bytes(number: u64, size: usize) -> Option<Vec<u8>> {
+    (size == 8 || number >> (8 * size) == 0).then(|| number.to_le_bytes()[..size].to_vec())
 }
 
 /// The names that `document` defines in a callable or a section: labels and

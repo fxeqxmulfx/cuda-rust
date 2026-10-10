@@ -15,7 +15,7 @@ Make one commit with a test for each fix.
   artifact objects (`*.embed.o`) are Rust objects without bitcode. `main` has
   the same problem. Keep the artifact objects out of the LTO input. Then
   examine the LTO modes that `retain_specialization_artifacts` skips.
-- [ ] The DWARF merge adds the file index offset of a bundle to its
+- [x] The DWARF merge adds the file index offset of a bundle to its
   `DW_AT_decl_file` and `DW_AT_call_file` values. LLVM writes small values with
   `DW_FORM_data1`. If a value is more than 255 after the offset, the bundle
   keeps only its line information. Thus in a module with more than 255 `.file`

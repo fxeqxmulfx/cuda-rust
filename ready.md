@@ -99,12 +99,14 @@ Commit: `91aa65df`.
 - The DWARF sections of all bundles go to the end of the module, with one
   abbreviation table. Before, ptxas did not assemble a merged module with
   different abbreviation tables.
+- A file index or an abbreviation code that does not fit in its form gets a
+  larger form. Before, such a bundle kept only its line information.
 - The PTX edits are sorted. Before, a merge was O(n²) in the number of edits.
 - The entry registry uses the entry names of the merge. Before, it parsed the
   merged PTX again.
 
 Commits: `bd060dae`, `b861e347`, `17e16979`, `5791e688`, `0d17fdd5`,
-`90e4e7bc`, `fa133758`, `e36baf18`.
+`90e4e7bc`, `fa133758`, `e36baf18`, `b4b7ef6b`.
 
 ### Generic Specializations in Libraries
 
@@ -140,6 +142,25 @@ the `sm_100a` requirement of the `.f32` form. Now only the `.f32` form gets it.
 
 Commit: `fe2795cd`.
 
+### LTO with Kernel Libraries
+
+With `lto = "fat"` or `lto = "thin"`, a binary that uses a library with kernels
+did not build. rustc read bitcode from the artifact objects of the rlib, and
+these objects have no bitcode. Now the artifact objects go into the rlib as
+DWARF objects, which LTO does not read. `main` has the same problem.
+
+Commit: `05da999b`.
+
+### Null Compare in `DisjointSlice::get_mut`
+
+`None` of `Option<&mut T>` is a null pointer. Thus after the bounds check, the
+PTX compared the slice pointer with null. Now the MIR `Assume` statement lowers
+to `llvm.assume`, and the accessors tell LLVM that the pointer is not null.
+`DisjointSlice::from_raw_parts` requires a pointer that is not null, also when
+`len` is 0. `main` has the same compare.
+
+Commit: `2f164ea7`.
+
 ### cutile Rustdoc Links and Benchmark Smoke Tests
 
 - Repair the public rustdoc links. Commit: `8208b01b`.
@@ -161,3 +182,6 @@ Commit: `fe2795cd`.
 - No `DynamicSharedArray` warning of the collector, and no unused workspace
   dependencies in cuda-oxide. Commits: `57a0480a`, `571c0c4b`.
 - syn 3.0.6 in all example locks. Commit: `92d1d43a`.
+- No `oxide` cargo alias in `cuda-oxide/`. In a checkout, an installed
+  `cargo oxide` runs the `cargo-oxide` of the checkout. Commit: `770f211e`.
+- No unused feature in a macro test. Commit: `d21dda9a`.

@@ -204,9 +204,10 @@ fn load_merged_ptx_bundles(
 /// and examples can check order-dependent merge properties: module-scope
 /// symbol uniqueness and extern alignment must hold for every bundle order,
 /// not just the one the current executable happens to embed (#1277).
-/// Module-scope variables without a linkage directive and non-extern device
-/// helpers are renamed within their bundle; explicit device extern link names
-/// and kernel identities remain.
+/// Module-scope variables without a linkage directive and device function
+/// definitions are renamed within their bundle. Only the first `.visible`
+/// definition of a function that a bundle declares `.extern` keeps its name,
+/// and these `.extern` declarations refer to it. Kernel identities remain.
 /// Duplicate kernel definitions, including identical definitions, are rejected
 /// before invoking the driver; typed loaders require an unambiguous entry.
 pub fn merge_ptx_bundles<'a>(
@@ -335,8 +336,9 @@ struct PtxMergeState<'source> {
     version: Option<PtxVersion>,
     /// The `.target` that covers the targets of all bundles.
     target: Option<PtxTarget>,
-    /// The functions that a bundle declares `.extern`.
-    extern_functions: HashSet<&'source str>,
+    /// For each function that a bundle declares `.extern`, the index of the
+    /// first bundle with a `.visible` definition of it.
+    extern_definitions: HashMap<&'source str, usize>,
 }
 
 impl<'source> PtxMergeState<'source> {
@@ -344,6 +346,7 @@ impl<'source> PtxMergeState<'source> {
         documents: &[(&str, ptx_parse::Document<'source>)],
     ) -> Result<Self, EmbeddedModuleError> {
         let mut state = Self::default();
+        let mut extern_functions = HashSet::new();
         let mut entries = HashMap::new();
         for (index, (name, document)) in documents.iter().enumerate() {
             let invalid_ptx = |reason: String| EmbeddedModuleError::InvalidPtx {
@@ -388,10 +391,16 @@ impl<'source> PtxMergeState<'source> {
             for callable in document.callables() {
                 let defined = callable.definition_scope().is_some();
                 match callable.kind() {
-                    // Explicit device externs keep their link names across bundles.
-                    // Every other helper belongs to the artifact that compiled it.
-                    ptx_parse::CallableKind::Function if callable.is_extern() => {
-                        state.extern_functions.insert(callable.name());
+                    ptx_parse::CallableKind::Function if !defined && callable.is_extern() => {
+                        extern_functions.insert(callable.name());
+                    }
+                    ptx_parse::CallableKind::Function
+                        if defined && callable.text().starts_with(".visible") =>
+                    {
+                        state
+                            .extern_definitions
+                            .entry(callable.name())
+                            .or_insert(index);
                     }
                     ptx_parse::CallableKind::Entry if defined => {
                         if let Some(first) = entries.insert(callable.name(), index) {
@@ -406,12 +415,16 @@ impl<'source> PtxMergeState<'source> {
                 }
             }
         }
+        state
+            .extern_definitions
+            .retain(|name, _| extern_functions.contains(name));
         Ok(state)
     }
 }
 
-/// Strip the headers and shift debug indices past the previous bundles.
-/// Returns the rewritten text and its highest debug file index.
+/// Strip the headers, shift debug indices past the previous bundles, rename
+/// the private symbols, and link the `.extern` declarations. Returns the
+/// rewritten text and its highest debug file index.
 fn prepare_bundle_body(
     document: &ptx_parse::Document,
     bundle_name: &str,
@@ -477,11 +490,27 @@ fn prepare_bundle_body(
         }
     }
     for callable in document.callables() {
-        if callable.kind() == ptx_parse::CallableKind::Function
-            && callable.definition_scope().is_some()
-            && !state.extern_functions.contains(callable.name())
+        if callable.kind() != ptx_parse::CallableKind::Function {
+            continue;
+        }
+        let definition = state.extern_definitions.get(callable.name()).copied();
+        if callable.definition_scope().is_some() {
+            if definition != Some(index) {
+                local_symbols.insert(callable.name());
+            }
+        } else if callable.is_extern()
+            && let Some(definition) = definition
         {
-            local_symbols.insert(callable.name());
+            let edit = if definition > index {
+                // A prototype of the definition later in the module.
+                span_tokens(document, callable.header_span())
+                    .find(|token| token.text(ptx) == ".extern")
+                    .map_or(Ok(()), |token| edits.replace(token.span(), ".visible"))
+            } else {
+                // The definition is earlier in the module.
+                edits.delete(callable.span())
+            };
+            edit.map_err(|error| invalid_ptx(error.to_string()))?;
         }
     }
     let prefix = format!("cuda_oxide_merge_{index}_");
@@ -747,21 +776,49 @@ mod tests {
 
     #[test]
     fn preserves_explicit_device_extern_link_names_across_bundles() {
-        let first = ptx_bundle(
+        let caller = ptx_bundle(
             "caller",
             ".version 8.9\n.target sm_80\n.address_size 64\n.extern .func exported();\n.visible .entry caller() { call exported, (); ret; }\n",
         );
-        let second = ptx_bundle(
+        let provider = ptx_bundle(
             "provider",
             ".version 8.9\n.target sm_80\n.address_size 64\n.visible .func exported() { ret; }\n.visible .entry provider() { ret; }\n",
         );
-        for bundles in [[&first, &second], [&second, &first]] {
-            let merged = merge_ptx_bundles(bundles).unwrap();
-            assert!(merged.contains(".extern .func exported()"));
-            assert!(merged.contains(".visible .func exported()"));
-            assert!(merged.contains("call exported, ()"));
-            assert!(!merged.contains("_exported"));
-        }
+        let copy = ptx_bundle(
+            "copy",
+            ".version 8.9\n.target sm_80\n.address_size 64\n.visible .func exported() { ret; }\n.visible .entry copy() { call exported, (); ret; }\n",
+        );
+        // The `.extern` declaration becomes a prototype of the later definition.
+        assert_eq!(
+            merge_ptx_bundles([&caller, &provider, &copy]).unwrap(),
+            "\
+.version 8.9
+.target sm_80
+.address_size 64
+.visible .func exported();
+.visible .entry caller() { call exported, (); ret; }
+.visible .func exported() { ret; }
+.visible .entry provider() { ret; }
+.visible .func cuda_oxide_merge_2_exported() { ret; }
+.visible .entry copy() { call cuda_oxide_merge_2_exported, (); ret; }
+"
+        );
+        // The definition is earlier than the `.extern` declaration, and the
+        // merge removes the declaration.
+        assert_eq!(
+            merge_ptx_bundles([&copy, &provider, &caller]).unwrap(),
+            "\
+.version 8.9
+.target sm_80
+.address_size 64
+.visible .func exported() { ret; }
+.visible .entry copy() { call exported, (); ret; }
+.visible .func cuda_oxide_merge_1_exported() { ret; }
+.visible .entry provider() { ret; }
+
+.visible .entry caller() { call exported, (); ret; }
+"
+        );
     }
 
     #[test]

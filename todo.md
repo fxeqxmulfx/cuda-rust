@@ -21,10 +21,13 @@ Make one commit with a test for each fix.
   keeps only its line information. Thus in a module with more than 255 `.file`
   directives, the last bundles can lose their DWARF. Give a larger form to
   these values, and change the unit lengths and the references.
-- [ ] `scripts/smoketest.sh --full-debug` fails for `iket_trace` and
-  `wgmma_mma_bf16`. IKET and the WGMMA accumulator fusion need the MIR
-  preparation that full debug skips, thus the backend refuses these kernels.
-  The census does not expect these refusals. `main` has the same failures.
+- [x] `scripts/smoketest.sh --full-debug` fails for `iket_trace`. IKET needs
+  the MIR preparation that full debug skips, thus the backend refuses the
+  kernel. `main` has the same failure.
+- [ ] `scripts/smoketest.sh --full-debug` fails for `wgmma_mma_bf16`. The
+  WGMMA accumulator fusion needs the MIR preparation that full debug skips,
+  thus the backend refuses the kernel. The census does not expect this
+  refusal. `main` has the same failure.
 - [x] In full debug, `packed_aggregate_abi` does not compile: "storing a packed
   aggregate containing a shared-memory pointer by value is target-mode
   dependent and is not yet supported". `main` has the same failure.

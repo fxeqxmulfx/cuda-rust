@@ -84,9 +84,8 @@ pub(crate) fn has_iket_operations(ctx: &Context, root: Ptr<Operation>) -> bool {
 /// Erase every semantic IKET operation without materializing anything.
 ///
 /// This is the `CUDA_OXIDE_IKET=off` path, split out so the pipeline can run
-/// it before its debug-mode preparation gate: an annotated kernel built with
-/// instrumentation disabled must compile in every configuration, including a
-/// full-debug build where `materialize` would never be reached.
+/// it before the IKET target pinning: a kernel built with instrumentation
+/// disabled must not pin its target.
 pub(crate) fn strip(ctx: &mut Context, module: Ptr<Operation>) -> Result<(), PipelineError> {
     if !has_iket_operations(ctx, module) {
         return Ok(());
@@ -262,6 +261,9 @@ pub(crate) fn materialize(
     for site in sites {
         insert_physical_site(ctx, site, placeholder, plan.instrument_method)?;
     }
+    // Full debug does not run mem2reg, thus range tokens can stay in their
+    // memory form.
+    erase_token_memory_plumbing(ctx, module);
     erase_token_plumbing(ctx, module)?;
     emit_metadata(
         ctx,
@@ -982,6 +984,94 @@ mod tests {
                 .all(|template| template.contains("pmevent.mask 1"))
         );
         assert!(!has_iket_operations(&ctx, module));
+    }
+
+    /// Full debug does not run mem2reg, thus a range token stays in its stack
+    /// slot. The range must still materialize at both sites.
+    #[test]
+    fn full_debug_materializes_a_range_token_in_a_stack_slot() {
+        use crate::options::{BackendOptions, DeviceArchHint};
+        use crate::pipeline::{
+            ModulePipelineRequest, OutputFiles, PipelineTrace, compile_translated_module,
+        };
+        use dialect_mir::{ops::MirLoadOp, types::MirPtrType};
+
+        let mut ctx = Context::new();
+        let module = test_module(&mut ctx, 0);
+        let function = collect_operations(&ctx, module)
+            .into_iter()
+            .find_map(|operation| Operation::get_op::<MirFuncOp>(operation, &ctx))
+            .unwrap();
+        let entry = function
+            .get_operation()
+            .deref(&ctx)
+            .get_region(0)
+            .deref(&ctx)
+            .iter(&ctx)
+            .next()
+            .unwrap();
+        let return_op = entry.deref(&ctx).get_terminator(&ctx).unwrap();
+        let token_type = IketRangeTokenType::get(&ctx).into();
+        let slot_type = MirPtrType::get_generic(&mut ctx, token_type, true).into();
+        let slot = Operation::new(
+            &mut ctx,
+            MirAllocaOp::get_concrete_op_info(),
+            vec![slot_type],
+            vec![],
+            vec![],
+            0,
+        );
+        slot.insert_before(&ctx, return_op);
+        let slot = slot.deref(&ctx).get_result(0);
+        let start = IketRangeStartOp::new(&mut ctx, "slot-range", IketPayloadKindAttr::None, None);
+        start.set_range_key(&mut ctx, "kernel::__CudaOxideIketRange");
+        start.get_operation().insert_before(&ctx, return_op);
+        let token = start.get_operation().deref(&ctx).get_result(0);
+        Operation::new(
+            &mut ctx,
+            MirStoreOp::get_concrete_op_info(),
+            vec![],
+            vec![slot, token],
+            vec![],
+            0,
+        )
+        .insert_before(&ctx, return_op);
+        let load = Operation::new(
+            &mut ctx,
+            MirLoadOp::get_concrete_op_info(),
+            vec![token_type],
+            vec![slot],
+            vec![],
+            0,
+        );
+        load.insert_before(&ctx, return_op);
+        let loaded = load.deref(&ctx).get_result(0);
+        let end = IketRangeEndOp::new(&mut ctx, loaded, IketPayloadKindAttr::None, None);
+        end.set_range_key(&mut ctx, "kernel::__CudaOxideIketRange");
+        end.get_operation().insert_before(&ctx, return_op);
+
+        let root = tempfile::tempdir().unwrap();
+        let llvm_ir = root.path().join("module.ll");
+        let ptx = root.path().join("module.ptx");
+        let backend = BackendOptions {
+            device_arch_hint: Some(DeviceArchHint::parse("sm_90".to_string())),
+            ..BackendOptions::default()
+        };
+        let request = ModulePipelineRequest::for_rust_pipeline(
+            &[],
+            false,
+            &backend,
+            llvm_export::export::DebugKind::Full,
+            OutputFiles {
+                llvm_ir: &llvm_ir,
+                ptx: &ptx,
+                stale_before_export: &[],
+            },
+            PipelineTrace::default(),
+        );
+        compile_translated_module(&mut ctx, module, &request).unwrap();
+        let ptx = std::fs::read_to_string(ptx).unwrap();
+        assert_eq!(ptx.matches("pmevent.mask 1").count(), 2, "{ptx}");
     }
 
     #[test]

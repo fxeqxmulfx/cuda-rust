@@ -227,10 +227,8 @@ pub fn compile_translated_module(
     }
 
     // `CUDA_OXIDE_IKET=off` strips the semantic annotation ops up front,
-    // before the full-debug preparation gate below: a disabled build of an
-    // annotated kernel must compile in every configuration, including a
-    // full-debug build in which the unstripped IKET operations would
-    // otherwise be rejected before the policy was ever consulted.
+    // before the IKET target pinning below: a disabled build materializes no
+    // IKET, thus IKET must not pin its target.
     if request.backend.iket == IketInstrumentation::Disabled {
         strip_iket(ctx, module)?;
     }
@@ -256,12 +254,6 @@ pub fn compile_translated_module(
     let backend = validated.options();
 
     let promote_and_unroll = !request.debug_kind.variables_enabled();
-    if !promote_and_unroll && has_iket_operations(ctx, module) {
-        return Err(PipelineError::Lowering(
-            "IKET requires MIR preparation; full variable debug information is not supported for an instrumented kernel"
-                .to_owned(),
-        ));
-    }
     if request.trace.verbose {
         if promote_and_unroll {
             request

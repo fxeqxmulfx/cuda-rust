@@ -166,7 +166,16 @@ pub(crate) fn convert_extract_field(
         .is_some();
 
     if is_scalar {
-        rewriter.replace_operation_with_values(ctx, op, vec![aggregate]);
+        if decl_index == 0 {
+            rewriter.replace_operation_with_values(ctx, op, vec![aggregate]);
+        } else {
+            // The verifier makes sure that the other fields are zero-sized.
+            let zst_ty = op.deref(ctx).get_result(0).get_type(ctx);
+            let zst_ty = convert_type(ctx, zst_ty).map_err(anyhow_to_pliron)?;
+            let undef_op = llvm::UndefOp::new(ctx, zst_ty);
+            rewriter.insert_operation(ctx, undef_op.get_operation());
+            rewriter.replace_operation(ctx, op, undef_op.get_operation());
+        }
         return Ok(());
     }
 
@@ -429,6 +438,51 @@ mod tests {
             zst_un_defs, 2,
             "one undef should build the ZST value and one should materialize the extracted ZST"
         );
+    }
+
+    /// A scalar-lowered newtype, like `ThreadIndex`, keeps only field 0. Its
+    /// other fields must be zero-sized, and extracting them gives undef.
+    #[test]
+    fn extract_zst_field_of_scalar_newtype_lowers_to_undef() {
+        for (field_ty_is_zst, expect_ok) in [(true, true), (false, false)] {
+            let mut ctx = make_ctx();
+            let i64_ty: TypeHandle = IntegerType::get(&ctx, 64, Signedness::Signless).into();
+            let zst_ty = empty_struct_ty(&mut ctx, "PhantomData");
+            let field_ty = if field_ty_is_zst { zst_ty } else { i64_ty };
+
+            let (module_ptr, block) = build_kernel(&mut ctx, vec![i64_ty], vec![]);
+            let scalar = block.deref(&ctx).get_argument(0);
+            for (index, ty) in [(0, i64_ty), (1, field_ty)] {
+                let extract = Operation::new(
+                    &mut ctx,
+                    MirExtractFieldOp::get_concrete_op_info(),
+                    vec![ty],
+                    vec![scalar],
+                    vec![],
+                    0,
+                );
+                MirExtractFieldOp::new(extract).set_attr_index(&ctx, FieldIndexAttr(index));
+                extract.insert_at_back(block, &ctx);
+            }
+            append_mir_return(&mut ctx, block, vec![]);
+
+            let lowered = crate::lower_mir_to_llvm(&mut ctx, module_ptr);
+            assert_eq!(lowered.is_ok(), expect_ok, "{lowered:?}");
+            if !expect_ok {
+                continue;
+            }
+
+            let body = kernel_blocks(&ctx, module_ptr);
+            assert_eq!(count_ops::<llvm::ExtractValueOp>(&ctx, &body), 0);
+            let zst_undefs = find_all::<llvm::UndefOp>(&ctx, &body)
+                .into_iter()
+                .filter(|op| {
+                    let result_ty = op.get_operation().deref(&ctx).get_result(0).get_type(&ctx);
+                    is_zero_sized_type(&ctx, result_ty)
+                })
+                .count();
+            assert_eq!(zst_undefs, 1);
+        }
     }
 
     /// The row-width arm of [`resolve_aggregate_slots`]' no-history fallback

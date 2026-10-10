@@ -298,14 +298,16 @@ impl Verify for MirExtractFieldOp {
         } else if operand_ty_obj.downcast_ref::<IntegerType>().is_some() {
             // Scalar-lowered newtype case: extracting field 0 from a scalar
             // This happens with newtypes like ThreadIndex(usize)
-            // The extraction is a no-op - just verify types match
+            // The extraction is a no-op - just verify types match.
+            // The other fields are zero-sized markers, like PhantomData.
             if index != 0 {
-                return verify_err!(
-                    op.loc(),
-                    "MirExtractFieldOp on scalar only supports field 0 (scalar-lowered newtype)"
-                );
-            }
-            if operand_ty != res_ty {
+                if !is_zero_sized(ctx, res_ty) {
+                    return verify_err!(
+                        op.loc(),
+                        "MirExtractFieldOp on scalar supports only field 0 and zero-sized fields (scalar-lowered newtype)"
+                    );
+                }
+            } else if operand_ty != res_ty {
                 return verify_err!(
                     op.loc(),
                     "MirExtractFieldOp on scalar (scalar-lowered newtype) must preserve type"
@@ -319,6 +321,27 @@ impl Verify for MirExtractFieldOp {
         }
 
         Ok(())
+    }
+}
+
+/// Whether `ty` has no bytes: a struct or a tuple of such types, or an array
+/// of such types or of length zero.
+fn is_zero_sized(ctx: &Context, ty: TypeHandle) -> bool {
+    let ty = ty.deref(ctx);
+    if let Some(struct_ty) = ty.downcast_ref::<MirStructType>() {
+        struct_ty
+            .field_types()
+            .iter()
+            .all(|&field| is_zero_sized(ctx, field))
+    } else if let Some(tuple_ty) = ty.downcast_ref::<MirTupleType>() {
+        tuple_ty
+            .get_types()
+            .iter()
+            .all(|&field| is_zero_sized(ctx, field))
+    } else if let Some(array_ty) = ty.downcast_ref::<MirArrayType>() {
+        array_ty.size() == 0 || is_zero_sized(ctx, array_ty.element_type())
+    } else {
+        false
     }
 }
 

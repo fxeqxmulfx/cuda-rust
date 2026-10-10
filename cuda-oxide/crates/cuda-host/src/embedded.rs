@@ -17,6 +17,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use thiserror::Error;
 
+mod dwarf;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod mapped_image;
 
@@ -221,8 +222,11 @@ fn load_merged_module(
 /// module string. The module starts with the highest `.version` of all
 /// bundles and a `.target` that covers the targets of all bundles. The first
 /// PTX bundle keeps its `.address_size` header, and later bundles contribute
-/// bodies without it. Only the first bundle with DWARF sections keeps them.
-/// Bundles without a PTX payload are skipped.
+/// bodies without it. The DWARF sections of all bundles go to the end of the
+/// module, with one abbreviation table. If the merge does not support the
+/// DWARF of the first bundle with DWARF sections, only that bundle keeps
+/// them. Another bundle with DWARF that the merge does not support keeps only
+/// its line information. Bundles without a PTX payload are skipped.
 ///
 /// This is the pure half of [`load_all_ptx_bundles_merged`], exposed so tests
 /// and examples can check order-dependent merge properties: module-scope
@@ -358,15 +362,22 @@ fn merge_ptx_documents<'source>(
         merged.push_str(&format!(".target {target}\n"));
     }
     let mut file_index_offset = 0;
+    let mut debug_sections: Vec<(&str, Vec<String>)> = Vec::new();
     for (index, (name, document)) in documents.iter().enumerate() {
-        let (body, max_file_index) =
-            prepare_bundle_body(document, name, index, file_index_offset, &state)?;
-        file_index_offset = file_index_offset.max(max_file_index);
-        merged.push_str(&body);
-        if !body.ends_with('\n') {
+        let bundle = prepare_bundle_body(document, name, index, file_index_offset, &state)?;
+        file_index_offset = file_index_offset.max(bundle.max_file_index);
+        merged.push_str(&bundle.body);
+        if !bundle.body.ends_with('\n') {
             merged.push('\n');
         }
+        for (section, content) in bundle.debug_sections {
+            match debug_sections.iter_mut().find(|(name, _)| *name == section) {
+                Some((_, contents)) => contents.push(content),
+                None => debug_sections.push((section, vec![content])),
+            }
+        }
     }
+    state.dwarf.write_sections(&debug_sections, &mut merged);
     Ok((merged, state.entries))
 }
 
@@ -449,8 +460,8 @@ struct PtxMergeState<'source> {
     version: Option<PtxVersion>,
     /// The `.target` that covers the targets of all bundles.
     target: Option<PtxTarget>,
-    /// The index of the first bundle with DWARF sections.
-    debug_sections: Option<usize>,
+    /// The DWARF sections of the bundles.
+    dwarf: dwarf::DwarfMerge<'source>,
     /// For each function that a bundle declares `.extern`, the index of the
     /// first bundle with a `.visible` definition of it.
     extern_definitions: HashMap<&'source str, usize>,
@@ -505,12 +516,10 @@ impl<'source> PtxMergeState<'source> {
                         };
                         state.target = Some(joined);
                     }
-                    ".section" if is_debug_section(arguments) => {
-                        state.debug_sections.get_or_insert(index);
-                    }
                     _ => {}
                 }
             }
+            state.dwarf.add(index, document);
             for callable in document.callables() {
                 let defined = callable.definition_scope().is_some();
                 match callable.kind() {
@@ -555,17 +564,25 @@ impl<'source> PtxMergeState<'source> {
     }
 }
 
-/// Strip the headers, strip the DWARF sections if an earlier bundle has
-/// them, remove the repeated generic kernel entries, shift debug indices past
-/// the previous bundles, rename the private symbols, and link the `.extern`
-/// declarations. Returns the rewritten text and its highest debug file index.
-fn prepare_bundle_body(
-    document: &ptx_parse::Document,
+/// A bundle body for the merged module.
+struct PreparedBundle<'source> {
+    body: String,
+    /// The highest debug file index of the body.
+    max_file_index: u64,
+    /// The names and contents of the DWARF sections that the bundle keeps.
+    debug_sections: Vec<(&'source str, String)>,
+}
+
+/// Strip the headers, take out the DWARF sections, remove the repeated
+/// generic kernel entries, shift debug indices past the previous bundles,
+/// rename the private symbols, and link the `.extern` declarations.
+fn prepare_bundle_body<'source>(
+    document: &ptx_parse::Document<'source>,
     bundle_name: &str,
     index: usize,
     file_index_offset: u64,
-    state: &PtxMergeState,
-) -> Result<(String, u64), EmbeddedModuleError> {
+    state: &PtxMergeState<'source>,
+) -> Result<PreparedBundle<'source>, EmbeddedModuleError> {
     let ptx = document.source();
     let invalid_ptx = |reason: String| EmbeddedModuleError::InvalidPtx {
         name: bundle_name.to_string(),
@@ -579,12 +596,43 @@ fn prepare_bundle_body(
     // without changing kernel entry identities or explicit extern link names.
     let mut local_symbols = HashSet::new();
     let mut removed = Vec::new();
+    // The bundle keeps its DWARF sections if the merge keeps its compile
+    // units. Each bundle keeps `.debug_str`, which has the function names of
+    // its `.loc` directives.
+    let units = state.dwarf.units(index).and_then(|units| {
+        let replacements = units.replacements(file_index_offset)?;
+        Some((units, replacements))
+    });
+    let mut kept_sections = Vec::new();
+    for section in dwarf::sections(document) {
+        if (units.is_some() && state.dwarf.keeps(section.name)) || section.name == ".debug_str" {
+            local_symbols.extend(
+                document
+                    .labels_in(section.body.clone())
+                    .map(|label| label.name()),
+            );
+            kept_sections.push(section);
+        } else {
+            edits
+                .delete(section.span.clone())
+                .map_err(|error| invalid_ptx(error.to_string()))?;
+            removed.push(section.span);
+        }
+    }
+    if let Some((units, replacements)) = &units {
+        local_symbols.extend(units.names());
+        for (span, text) in replacements {
+            edits
+                .replace(span.clone(), text.as_str())
+                .map_err(|error| invalid_ptx(error.to_string()))?;
+        }
+    }
     for callable in document.callables() {
         if callable.kind() == ptx_parse::CallableKind::Entry
             && state.repeated_entries.contains(&(index, callable.name()))
         {
             // The DWARF sections refer to the labels of the entry.
-            if state.debug_sections == Some(index) {
+            if units.is_some() {
                 local_symbols.insert(callable.name());
             } else {
                 let span = callable.span();
@@ -613,27 +661,6 @@ fn prepare_bundle_body(
                 edits
                     .delete(directive.line_span())
                     .map_err(|error| invalid_ptx(error.to_string()))?;
-            }
-            // ptxas reads each DWARF compile unit with the abbreviation table
-            // of the first one. The module keeps the sections of one bundle.
-            ".section"
-                if is_debug_section(directive.arguments())
-                    && state.debug_sections != Some(index) =>
-            {
-                let line = directive.line_span();
-                let end = document
-                    .scopes()
-                    .iter()
-                    .find(|scope| scope.header() == Some(directive.statement()))
-                    .map_or(line.end, |scope| {
-                        let end = scope.span().end;
-                        line.end
-                            .max(end + usize::from(ptx[end..].starts_with('\n')))
-                    });
-                edits
-                    .delete(line.start..end)
-                    .map_err(|error| invalid_ptx(error.to_string()))?;
-                removed.push(line.start..end);
             }
             // A module-scope variable without a linkage directive.
             ".global" | ".const" | ".shared" if directive.scope() == ptx_parse::ScopeId::ROOT => {
@@ -707,15 +734,32 @@ fn prepare_bundle_body(
         }
     }
 
-    let body = edits
-        .apply(ptx)
+    let applied = edits
+        .apply_with_map(ptx)
         .map_err(|error| invalid_ptx(error.to_string()))?;
-    Ok((body, max_file_index))
-}
-
-/// Whether a `.section` directive with `arguments` opens a DWARF section.
-fn is_debug_section(arguments: &str) -> bool {
-    arguments.trim_start().starts_with(".debug_")
+    // The merge writes the DWARF sections at the end of the module.
+    let mut body = String::new();
+    let mut debug_sections = Vec::new();
+    let mut cursor = 0;
+    for section in kept_sections {
+        let output = |span: Range<usize>| {
+            applied
+                .map
+                .original_range_to_output(span)
+                .ok_or_else(|| invalid_ptx("a DWARF section is outside the PTX".to_string()))
+        };
+        let span = output(section.span)?;
+        let content = output(section.body)?;
+        body.push_str(&applied.text[cursor..span.start]);
+        cursor = span.end;
+        debug_sections.push((section.name, applied.text[content].trim().to_string()));
+    }
+    body.push_str(&applied.text[cursor..]);
+    Ok(PreparedBundle {
+        body,
+        max_file_index,
+        debug_sections,
+    })
 }
 
 /// The tokens of the text before the body of a callable definition, without
@@ -1307,6 +1351,7 @@ $L__func_begin0:
         );
     }
 
+    /// The merge does not support this `.debug_info`.
     #[test]
     fn keeps_the_dwarf_sections_of_the_first_bundle_with_them() {
         let plain = target_bundle("plain", "sm_80");
@@ -1328,13 +1373,140 @@ $L__func_begin0:
 .visible .entry plain() { ret; }
 .global .align 1 .b8 cuda_oxide_merge_1_data[1];
 .visible .entry first() { ret; }
+.global .align 1 .b8 cuda_oxide_merge_2_data[1];
+.visible .entry second() { ret; }
 \t.section\t.debug_info
 \t{
 .b64 cuda_oxide_merge_1_data
 \t}
 \t.section\t.debug_macinfo\t{\t}
-.global .align 1 .b8 cuda_oxide_merge_2_data[1];
-.visible .entry second() { ret; }
+"
+        );
+    }
+
+    /// A bundle with an entry, line information, and DWARF `sections`
+    /// before `.debug_str` and `.debug_macinfo`.
+    fn dwarf_bundle(name: &str, local: &str, sections: &str) -> OwnedArtifactBundle {
+        ptx_bundle(
+            name,
+            &format!(
+                ".version 8.9\n.target sm_90, debug\n.address_size 64\n.file 1 \"{name}.rs\"\n.visible .entry {name}()\n{{\n{local}$L__func_begin0:\n\t.loc\t1 2 3, function_name $L__info_string0, inlined_at 1 4 5\n\tret;\n}}\n{sections}\t.section\t.debug_str\n\t{{\n$L__info_string0:\n.b8 0\n\t}}\n\t.section\t.debug_macinfo\t{{\t}}\n"
+            ),
+        )
+    }
+
+    #[test]
+    fn merges_the_dwarf_sections_of_all_bundles() {
+        // Code 1 is a compile unit, and code 2 is a subprogram with a file.
+        let first = dwarf_bundle(
+            "first",
+            "",
+            "\t.section\t.debug_abbrev\n\t{\n.b8 1, 17, 1, 16, 6, 0, 0\n.b8 2, 46, 0, 17, 1, 58, 11, 0, 0\n.b8 0\n\t}\n\t.section\t.debug_info\n\t{\n.b32 23\n.b8 2, 0\n.b32 .debug_abbrev\n.b8 8\n.b8 1\n.b32 .debug_line\n.b8 2\n.b64 $L__func_begin0\n.b8 1\n.b8 0\n\t}\n",
+        );
+        // The codes of the compile unit and the subprogram change places.
+        // Code 3 is a variable in the local depot. LLVM 21 also writes the
+        // name tables.
+        let second = dwarf_bundle(
+            "second",
+            "\t.local .align 8 .b8 \t__local_depot0[8];\n",
+            "\t.section\t.debug_abbrev\n\t{\n.b8 1, 46, 0, 17, 1, 58, 11, 0, 0\n.b8 2, 17, 1, 16, 6, 0, 0\n.b8 3, 52, 0, 2, 10, 0, 0\n.b8 0\n\t}\n\t.section\t.debug_info\n\t{\n.b32 34\n.b8 2, 0\n.b32 .debug_abbrev\n.b8 8\n.b8 2\n.b32 .debug_line\n.b8 1\n.b64 $L__func_begin0\n.b8 1\n.b8 3, 9, 3\n.b64 __local_depot0\n.b8 0\n\t}\n\t.section\t.debug_pubnames\n\t{\n.b32 $L__pubNames_end0-$L__pubNames_start0\n$L__pubNames_start0:\n.b8 2, 0\n.b32 .debug_info\n.b32 38\n.b32 0\n$L__pubNames_end0:\n\t}\n",
+        );
+        // The merge does not support DWARF 5.
+        let third = dwarf_bundle(
+            "third",
+            "",
+            "\t.section\t.debug_abbrev\n\t{\n.b8 1, 17, 0, 16, 6, 0, 0\n.b8 0\n\t}\n\t.section\t.debug_info\n\t{\n.b32 13\n.b8 5, 0, 1, 8\n.b32 .debug_abbrev\n.b8 1\n.b32 .debug_line\n\t}\n",
+        );
+        assert_eq!(
+            merge_ptx_bundles([&first, &second, &third]).unwrap(),
+            "\
+.version 8.9
+.target sm_90, debug
+.address_size 64
+.file 1 \"first.rs\"
+.visible .entry first()
+{
+cuda_oxide_merge_0_$L__func_begin0:
+\t.loc\t1 2 3, function_name cuda_oxide_merge_0_$L__info_string0, inlined_at 1 4 5
+\tret;
+}
+.file 2 \"second.rs\"
+.visible .entry second()
+{
+\t.local .align 8 .b8 \tcuda_oxide_merge_1___local_depot0[8];
+cuda_oxide_merge_1_$L__func_begin0:
+\t.loc\t2 2 3, function_name cuda_oxide_merge_1_$L__info_string0, inlined_at 2 4 5
+\tret;
+}
+.file 3 \"third.rs\"
+.visible .entry third()
+{
+$L__func_begin0:
+\t.loc\t3 2 3, function_name cuda_oxide_merge_2_$L__info_string0, inlined_at 3 4 5
+\tret;
+}
+\t.section\t.debug_abbrev
+\t{
+.b8 1
+.b8 17
+.b8 1
+.b8 16
+.b8 6
+.b8 0
+.b8 0
+.b8 2
+.b8 46
+.b8 0
+.b8 17
+.b8 1
+.b8 58
+.b8 11
+.b8 0
+.b8 0
+.b8 3
+.b8 52
+.b8 0
+.b8 2
+.b8 10
+.b8 0
+.b8 0
+.b8 0
+\t}
+\t.section\t.debug_info
+\t{
+.b32 23
+.b8 2, 0
+.b32 .debug_abbrev
+.b8 8
+.b8 1
+.b32 .debug_line
+.b8 2
+.b64 cuda_oxide_merge_0_$L__func_begin0
+.b8 1
+.b8 0
+.b32 34
+.b8 2, 0
+.b32 .debug_abbrev
+.b8 8
+.b8 1
+.b32 .debug_line
+.b8 2
+.b64 cuda_oxide_merge_1_$L__func_begin0
+.b8 2
+.b8 3, 9, 3
+.b64 cuda_oxide_merge_1___local_depot0
+.b8 0
+\t}
+\t.section\t.debug_str
+\t{
+cuda_oxide_merge_0_$L__info_string0:
+.b8 0
+cuda_oxide_merge_1_$L__info_string0:
+.b8 0
+cuda_oxide_merge_2_$L__info_string0:
+.b8 0
+\t}
+\t.section\t.debug_macinfo\t{\t}
 "
         );
     }
@@ -1357,6 +1529,7 @@ $L__func_begin0:
             file_index_offset,
             &PtxMergeState::default(),
         )
+        .map(|bundle| (bundle.body, bundle.max_file_index))
     }
 
     #[test]

@@ -23,7 +23,7 @@ Make one commit with a test for each fix.
   the image. Thus two crates with a non-generic kernel of the same name give
   `ConflictingEntry`. Also, the driver compiles the PTX of all crates for each
   of these modules. Merge only the bundles that the module needs.
-- [ ] Only the first merged bundle with DWARF sections keeps them, because
+- [x] Only the first merged bundle with DWARF sections keeps them, because
   ptxas reads all compile units with the first abbreviation table. The other
   bundles keep only line information. Combine the abbreviation tables.
 - [x] CI uses only LLVM 23. In `main`, the unit tests use LLVM 21, the

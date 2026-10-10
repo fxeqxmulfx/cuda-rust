@@ -257,7 +257,7 @@ fn kernel_slice_device_ptr<T>(
 #[track_caller]
 #[doc(hidden)]
 pub fn read_only_device_buffer_arg<T>(
-    buffer: &cuda_core::DeviceBuffer<T>,
+    buffer: &(impl KernelSliceArg<Elem = T> + ?Sized),
 ) -> (cuda_core::sys::CUdeviceptr, u64) {
     let len = buffer.len();
     (
@@ -281,7 +281,7 @@ pub fn read_only_device_buffer_arg<T>(
 #[track_caller]
 #[doc(hidden)]
 pub fn writable_device_buffer_arg<T>(
-    buffer: &mut cuda_core::DeviceBuffer<T>,
+    buffer: &mut (impl KernelSliceArgMut<Elem = T> + ?Sized),
 ) -> (cuda_core::sys::CUdeviceptr, u64) {
     let len = buffer.len();
     (
@@ -443,10 +443,10 @@ pub fn push_kernel_row_width_device_slice(
 }
 
 // =============================================================================
-// Typed Async Kernel Arguments
+// Typed Kernel Arguments
 // =============================================================================
 
-/// A typed device allocation that can be passed to an async kernel launch as a
+/// A typed device allocation that can be passed to a kernel launch as a
 /// read-only device slice.
 ///
 /// # Safety
@@ -480,7 +480,6 @@ pub fn push_kernel_row_width_device_slice(
 ///     fn len(&self) -> usize { 1_000_000 }
 /// }
 /// ```
-#[cfg(feature = "async")]
 pub unsafe trait KernelSliceArg {
     /// Element type stored in the allocation.
     type Elem;
@@ -497,7 +496,7 @@ pub unsafe trait KernelSliceArg {
     }
 }
 
-/// A typed device allocation that can be passed to an async kernel launch as a
+/// A typed device allocation that can be passed to a kernel launch as a
 /// writable device slice.
 ///
 /// # Safety
@@ -507,10 +506,20 @@ pub unsafe trait KernelSliceArg {
 /// this rule: the implementor must own exclusive device-write authority for
 /// the entire reported element range for the lifetime of the mutable borrow or
 /// owned operation.
-#[cfg(feature = "async")]
+///
+/// A read-only checked view cannot be passed to a writable launcher:
+///
+/// ```compile_fail
+/// use cuda_core::DeviceBuffer;
+/// use cuda_host::KernelSliceArgMut;
+/// fn writes(_: &mut impl KernelSliceArgMut<Elem = u32>) {}
+/// fn rejects_read_view(buffer: &DeviceBuffer<u32>) {
+///     let mut read = buffer.as_chunks::<u32>().unwrap();
+///     writes(&mut read);
+/// }
+/// ```
 pub unsafe trait KernelSliceArgMut: KernelSliceArg {}
 
-#[cfg(feature = "async")]
 // SAFETY: DeviceBuffer owns the reported allocation and keeps its CUDA context
 // alive; its pointer and length accessors describe that allocation exactly.
 unsafe impl<T> KernelSliceArg for cuda_core::DeviceBuffer<T> {
@@ -525,10 +534,41 @@ unsafe impl<T> KernelSliceArg for cuda_core::DeviceBuffer<T> {
     }
 }
 
-#[cfg(feature = "async")]
 // SAFETY: &mut DeviceBuffer provides exclusive host authority to launch device
 // writes through this adapter for the duration of the operation.
 unsafe impl<T> KernelSliceArgMut for cuda_core::DeviceBuffer<T> {}
+
+// SAFETY: checked views report the original live allocation's exact extent,
+// alignment and lifetime; shared borrows provide read-only authority.
+unsafe impl<T> KernelSliceArg for cuda_core::DeviceView<'_, T> {
+    type Elem = T;
+
+    fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {
+        self.cu_deviceptr()
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+// SAFETY: the checked view retains an exclusive borrow of its source buffer;
+// shared borrows of the view provide read-only access during a launch.
+unsafe impl<T> KernelSliceArg for cuda_core::DeviceViewMut<'_, T> {
+    type Elem = T;
+
+    fn cu_deviceptr(&self) -> cuda_core::sys::CUdeviceptr {
+        std::ops::Deref::deref(self).cu_deviceptr()
+    }
+
+    fn len(&self) -> usize {
+        std::ops::Deref::deref(self).len()
+    }
+}
+
+// SAFETY: the view's exclusive source borrow excludes overlapping writes and
+// source-buffer access for the full operation, without transferring ownership.
+unsafe impl<T> KernelSliceArgMut for cuda_core::DeviceViewMut<'_, T> {}
 
 #[cfg(feature = "async")]
 // SAFETY: DeviceBox owns the reported allocation and its raw constructor

@@ -9,6 +9,7 @@
 fn launch_contract_types_are_resolved_semantically() {
     let t = trybuild::TestCases::new();
     t.pass("tests/pass/launch_contract_disjoint_aliases.rs");
+    t.pass("tests/pass/launch_contract_borrowed_views.rs");
     t.pass("tests/pass/launch_contract_const_dimensions.rs");
     t.pass("tests/pass/launch_contract_uniform_scalar.rs");
     t.pass("tests/pass/kernel_launch_context_api.rs");

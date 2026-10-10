@@ -395,7 +395,145 @@ impl<T> DeviceBuffer<T> {
     }
 }
 
+/// A checked, borrowed interpretation of a device allocation.
+///
+/// Created by [`DeviceBuffer::as_chunks`]. It never owns or frees memory and
+/// cannot outlive its source buffer. This type deliberately has no `Clone` or
+/// `Copy` implementation: a read view borrowed from a mutable view must not
+/// escape that shorter borrow.
+pub struct DeviceView<'a, T> {
+    ptr: CUdeviceptr,
+    len: usize,
+    ctx: &'a Arc<CudaContext>,
+    _marker: PhantomData<&'a T>,
+}
+
+impl<T> DeviceView<'_, T> {
+    /// Returns the checked device pointer.
+    pub fn cu_deviceptr(&self) -> CUdeviceptr {
+        self.ptr
+    }
+
+    /// Returns the number of elements in this interpretation.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns whether the view is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the original allocation's context.
+    pub fn context(&self) -> &Arc<CudaContext> {
+        self.ctx
+    }
+}
+
+/// An exclusive checked interpretation of a borrowed device allocation.
+///
+/// Created by [`DeviceBuffer::as_chunks_mut`]. The source buffer is exclusively
+/// borrowed for the view's lifetime. There is no owning-buffer accessor or
+/// mutable dereference: users cannot replace, resize, free, or steal its
+/// allocation. Dropping or forgetting the view never frees the source.
+///
+/// ```compile_fail
+/// # use cuda_core::DeviceBuffer;
+/// # fn overlapping(buffer: &mut DeviceBuffer<f32>) {
+/// let view = buffer.as_chunks_mut::<[f32; 2]>().unwrap();
+/// let second = buffer.as_chunks_mut::<f32>().unwrap();
+/// assert_eq!(view.len(), second.len());
+/// # }
+/// ```
+///
+/// ```compile_fail
+/// # use cuda_core::{DeviceBuffer, DeviceViewMut};
+/// fn escape(buffer: &mut DeviceBuffer<f32>) -> DeviceViewMut<'static, f32> {
+///     buffer.as_chunks_mut::<f32>().unwrap()
+/// }
+/// ```
+pub struct DeviceViewMut<'a, T> {
+    view: DeviceView<'a, T>,
+    _exclusive: PhantomData<&'a mut T>,
+}
+
+impl<'a, T> std::ops::Deref for DeviceViewMut<'a, T> {
+    type Target = DeviceView<'a, T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.view
+    }
+}
+
+/// The allocation cannot be represented by whole, correctly aligned elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceViewError;
+
+impl std::fmt::Display for DeviceViewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("device allocation cannot be viewed as the requested element type")
+    }
+}
+
+impl std::error::Error for DeviceViewError {}
+
 impl<T: DeviceCopy> DeviceBuffer<T> {
+    /// Borrow this allocation as another device-copyable element type.
+    ///
+    /// A shared view cannot coexist with a mutable source borrow:
+    ///
+    /// ```compile_fail
+    /// # use cuda_core::DeviceBuffer;
+    /// # fn overlapping(buffer: &mut DeviceBuffer<u32>) {
+    /// let read = buffer.as_chunks::<u32>().unwrap();
+    /// let write = buffer.as_chunks_mut::<u32>().unwrap();
+    /// assert_eq!(read.len(), write.len());
+    /// # }
+    /// ```
+    ///
+    /// Checks the complete byte extent and actual pointer alignment. Returns
+    /// `None` for a partial element, insufficient alignment, or a zero-sized
+    /// destination type. No allocation, copy, or ownership transfer occurs.
+    pub fn as_chunks<A: DeviceCopy>(&self) -> Option<DeviceView<'_, A>> {
+        let len = chunk_cast_len(
+            self.num_bytes,
+            self.ptr as usize,
+            std::mem::size_of::<A>(),
+            std::mem::align_of::<A>(),
+        )?;
+        Some(DeviceView {
+            ptr: self.ptr,
+            len,
+            ctx: &self.ctx,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Exclusively borrow this allocation as another device-copyable type.
+    ///
+    /// Uses the same checked layout as [`Self::as_chunks`]. Both element types
+    /// implement `DeviceCopy`, so writes through the new interpretation retain
+    /// valid bit patterns for the original interpretation.
+    pub fn as_chunks_mut<A: DeviceCopy>(&mut self) -> Option<DeviceViewMut<'_, A>> {
+        Some(DeviceViewMut {
+            view: self.as_chunks()?,
+            _exclusive: PhantomData,
+        })
+    }
+
+    /// Run a scoped operation with a checked exclusive element interpretation.
+    ///
+    /// The original buffer is never moved or replaced. It remains intact on
+    /// normal return, operation failure, or unwinding. The callback's result
+    /// is returned unchanged; a failed layout check does not run the callback.
+    pub fn with_chunks<A: DeviceCopy, R>(
+        &mut self,
+        run: impl FnOnce(&mut DeviceViewMut<'_, A>) -> R,
+    ) -> Result<R, DeviceViewError> {
+        let mut view = self.as_chunks_mut().ok_or(DeviceViewError)?;
+        Ok(run(&mut view))
+    }
+
     /// Allocates device memory, copies `data` from the host on `stream`, and
     /// synchronizes `stream` before returning.
     ///

@@ -421,3 +421,55 @@ fn uninitialized_async_cast_elem_implicit_drop_is_stream_ordered() {
     }
     stream.synchronize().expect("stream sync failed");
 }
+
+#[test]
+fn checked_views_preserve_allocation_and_reject_partial_elements() {
+    let ctx = CudaContext::new(0).unwrap();
+    let stream = ctx.new_stream().unwrap();
+    let mut buffer = DeviceBuffer::from_host(&stream, &[1_u32, 2, 3, 4]).unwrap();
+    let pointer = buffer.cu_deviceptr();
+    {
+        let view = buffer.as_chunks::<[u32; 2]>().unwrap();
+        assert_eq!(view.len(), 2);
+        assert_eq!(view.cu_deviceptr(), pointer);
+        assert!(std::sync::Arc::ptr_eq(view.context(), buffer.context()));
+    }
+    {
+        let view = buffer.as_chunks_mut::<[u32; 4]>().unwrap();
+        assert_eq!(view.len(), 1);
+        assert_eq!(view.cu_deviceptr(), pointer);
+    }
+    assert!(buffer.as_chunks::<[u32; 3]>().is_none());
+    assert!(buffer.as_chunks_mut::<[u32; 3]>().is_none());
+    assert!(buffer.as_chunks::<()>().is_none());
+    assert_eq!(buffer.cu_deviceptr(), pointer);
+    assert_eq!(buffer.to_host_vec(&stream).unwrap(), [1, 2, 3, 4]);
+    let mut empty = DeviceBuffer::<u32>::zeroed(&stream, 0).unwrap();
+    assert!(empty.as_chunks::<[u32; 2]>().unwrap().is_empty());
+    assert!(empty.as_chunks_mut::<[u32; 2]>().unwrap().is_empty());
+}
+
+#[test]
+fn scoped_views_preserve_source_on_failure_and_unwind() {
+    let ctx = CudaContext::new(0).unwrap();
+    let stream = ctx.new_stream().unwrap();
+    let mut buffer = DeviceBuffer::from_host(&stream, &[1_u32, 2, 3, 4]).unwrap();
+    let pointer = buffer.cu_deviceptr();
+    let result = buffer.with_chunks::<[u32; 2], _>(|view| {
+        assert_eq!(view.len(), 2);
+        Err::<(), _>("operation failed")
+    });
+    assert_eq!(result.unwrap(), Err("operation failed"));
+    let mut called = false;
+    assert!(buffer
+        .with_chunks::<[u32; 3], _>(|_| called = true)
+        .is_err());
+    assert!(!called);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = buffer.with_chunks::<[u32; 2], _>(|_| panic!("operation panicked"));
+    }));
+    assert!(panic.is_err());
+    assert_eq!(buffer.len(), 4);
+    assert_eq!(buffer.cu_deviceptr(), pointer);
+    assert_eq!(buffer.to_host_vec(&stream).unwrap(), [1, 2, 3, 4]);
+}

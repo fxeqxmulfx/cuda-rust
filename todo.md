@@ -9,7 +9,7 @@ Make one commit with a test for each fix.
 
 ## Bugs
 
-- [ ] With `lto = "fat"` or `lto = "thin"`, the build of `cross_crate_embedded`
+- [x] With `lto = "fat"` or `lto = "thin"`, the build of `cross_crate_embedded`
   fails: "failed to get bitcode from object file for LTO (Can't find section
   .llvmbc)". rustc reads LLVM bitcode from each Rust object of the rlibs. The
   artifact objects (`*.embed.o`) are Rust objects without bitcode. `main` has

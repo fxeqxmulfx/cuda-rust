@@ -28,23 +28,11 @@ use rustc_codegen_ssa::CrateInfo;
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::middle::exported_symbols::SymbolExportKind;
 use rustc_session::Session;
-use rustc_session::config::Lto;
 use rustc_structures::CrateType;
 
 /// Add the anchors of the statically linked artifact objects with generic
 /// kernel specializations to the symbols that rustc keeps.
 pub(crate) fn retain_specialization_artifacts(sess: &Session, crate_info: &mut CrateInfo) {
-    // With these LTO modes, rustc does not link the Rust objects of the
-    // rlibs, and the artifact objects are Rust objects.
-    let rlib_objects_removed = match sess.lto() {
-        Lto::Fat => true,
-        Lto::Thin => !sess.opts.cg.linker_plugin_lto.enabled(),
-        Lto::No | Lto::ThinLocal => false,
-    };
-    if rlib_objects_removed {
-        return;
-    }
-
     let mut anchors = HashMap::new();
     for crate_type in crate_info.crate_types.clone() {
         if !matches!(

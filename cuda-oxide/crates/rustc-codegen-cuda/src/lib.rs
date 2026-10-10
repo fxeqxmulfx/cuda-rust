@@ -343,6 +343,7 @@ use rustc_middle::ty::TyCtxt;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_session::config::OutputFilenames;
 use rustc_session::{CodegenBackendInit, EarlySession, IncrCompSession, Session};
+use rustc_structures::CrateType;
 use std::any::Any;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -854,16 +855,9 @@ impl CodegenBackend for CudaCodegenBackend {
             crate_info,
         );
         for (index, object) in ongoing.artifact_objects.into_iter().enumerate() {
-            compiled_modules.modules.push(CompiledModule {
-                name: format!("oxide_artifact_embed_{index}"),
-                kind: ModuleKind::Regular,
-                object: Some(object),
-                dwarf_object: None,
-                bytecode: None,
-                assembly: None,
-                llvm_ir: None,
-                global_asm_object: None,
-            });
+            compiled_modules
+                .modules
+                .push(artifact_module(index, object, &crate_info.crate_types));
         }
         (compiled_modules, work_products)
     }
@@ -879,6 +873,33 @@ impl CodegenBackend for CudaCodegenBackend {
         upstream_artifacts::retain_specialization_artifacts(sess, &mut crate_info);
         self.llvm_backend
             .link(sess, compiled_modules, crate_info, metadata, outputs);
+    }
+}
+
+/// The module of an artifact object.
+///
+/// rustc lists the objects of the modules of an rlib as Rust objects. With
+/// LTO, a downstream crate reads bitcode from each Rust object of the rlib, and
+/// it removes these objects from the link. The artifact objects have no
+/// bitcode. rustc also puts the DWARF objects of the modules in the rlib, but
+/// it does not list them as Rust objects. Thus, when the session writes only an
+/// rlib, the artifact object is the DWARF object of its module. Other sessions
+/// link the artifact objects.
+fn artifact_module(index: usize, object: PathBuf, crate_types: &[CrateType]) -> CompiledModule {
+    let (object, dwarf_object) = if crate_types == [CrateType::Rlib] {
+        (None, Some(object))
+    } else {
+        (Some(object), None)
+    };
+    CompiledModule {
+        name: format!("oxide_artifact_embed_{index}"),
+        kind: ModuleKind::Regular,
+        object,
+        dwarf_object,
+        bytecode: None,
+        assembly: None,
+        llvm_ir: None,
+        global_asm_object: None,
     }
 }
 
@@ -1259,6 +1280,19 @@ pub(crate) fn host_target_supported(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_artifact_objects_of_an_rlib_are_not_rust_objects() {
+        let object = PathBuf::from("library.0.0.embed.o");
+        let rlib = artifact_module(0, object.clone(), &[CrateType::Rlib]);
+        assert_eq!(rlib.object, None);
+        assert_eq!(rlib.dwarf_object, Some(object.clone()));
+
+        // The dynamic library links the artifact object.
+        let mixed = artifact_module(1, object.clone(), &[CrateType::Rlib, CrateType::Cdylib]);
+        assert_eq!(mixed.object, Some(object));
+        assert_eq!(mixed.dwarf_object, None);
+    }
 
     #[test]
     fn host_targets_that_match_the_ptx_data_model_are_accepted() {

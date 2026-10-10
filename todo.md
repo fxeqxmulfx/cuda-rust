@@ -26,7 +26,7 @@ Make one commit with a test for each fix.
 - [ ] Only the first merged bundle with DWARF sections keeps them, because
   ptxas reads all compile units with the first abbreviation table. The other
   bundles keep only line information. Combine the abbreviation tables.
-- [ ] CI uses only LLVM 23. In `main`, the unit tests use LLVM 21, the
+- [x] CI uses only LLVM 23. In `main`, the unit tests use LLVM 21, the
   documented minimum, and the example build uses LLVM 22. Add jobs for these
   versions, or change the documented minimum.
 

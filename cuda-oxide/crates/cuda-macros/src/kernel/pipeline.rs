@@ -14,7 +14,7 @@ use syn::{
 };
 
 struct Args {
-    rows: usize,
+    rows: Expr,
     iterations: Expr,
 }
 impl Parse for Args {
@@ -24,8 +24,7 @@ impl Parse for Args {
             return Err(syn::Error::new_spanned(rows, "expected rows"));
         }
         input.parse::<Token![=]>()?;
-        let rows: syn::LitInt = input.parse()?;
-        let rows = rows.base10_parse()?;
+        let rows: Expr = input.parse()?;
         input.parse::<Token![,]>()?;
         let key: Ident = input.parse()?;
         if key != "iterations" {
@@ -42,15 +41,34 @@ struct SourceArgs {
     columns: Expr,
     stride: Expr,
     offset: Expr,
+    swizzle: bool,
 }
 impl Parse for SourceArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut columns = None;
         let mut stride = None;
         let mut offset = None;
+        let mut swizzle = None;
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
+            if key == "layout" {
+                if swizzle.is_some() {
+                    return Err(syn::Error::new_spanned(key, "duplicate tile layout"));
+                }
+                let layout: Ident = input.parse()?;
+                if layout != "xor32" {
+                    return Err(syn::Error::new_spanned(
+                        layout,
+                        "supported tile layout is xor32",
+                    ));
+                }
+                swizzle = Some(true);
+                if !input.is_empty() {
+                    input.parse::<Token![,]>()?;
+                }
+                continue;
+            }
             let slot = match key.to_string().as_str() {
                 "columns" => &mut columns,
                 "stride" => &mut stride,
@@ -80,6 +98,7 @@ impl Parse for SourceArgs {
             columns: columns.ok_or_else(missing)?,
             stride: stride.ok_or_else(missing)?,
             offset: offset.ok_or_else(missing)?,
+            swizzle: swizzle.unwrap_or(false),
         })
     }
 }
@@ -88,9 +107,10 @@ struct Source {
     columns: Expr,
     stride: Expr,
     offset: Expr,
+    swizzle: bool,
 }
 pub(crate) struct BlockPipeline {
-    rows: usize,
+    rows: Expr,
     iterations: Expr,
     sources: Vec<Source>,
     element: Type,
@@ -138,7 +158,11 @@ impl BlockPipeline {
             ));
         }
         let Args { rows, iterations } = attr.parse_args()?;
-        if !(1..=64).contains(&rows) {
+        validate_offset(&rows, &const_names(input))?;
+        if let Expr::Lit(lit) = &rows
+            && let syn::Lit::Int(lit) = &lit.lit
+            && !(1..=64).contains(&lit.base10_parse::<usize>()?)
+        {
             return Err(syn::Error::new_spanned(
                 attr,
                 "pipeline rows must be in 1..=64",
@@ -268,6 +292,7 @@ impl BlockPipeline {
                 columns,
                 stride,
                 offset,
+                swizzle,
             } = attr.parse_args()?;
             validate_offset(&columns, &constants)?;
             validate_offset(&stride, &constants)?;
@@ -277,6 +302,7 @@ impl BlockPipeline {
                 columns,
                 stride,
                 offset,
+                swizzle,
             });
         }
         if sources.is_empty() {
@@ -325,19 +351,22 @@ impl BlockPipeline {
     }
 
     pub(crate) fn bytes(&self) -> Expr {
-        let rows = self.rows;
+        let rows = remap(&self.rows);
         let element = &self.element;
         let mut total = quote! { 0usize };
         for source in &self.sources {
-            let columns = &source.columns;
+            let columns = remap(&source.columns);
+            if source.swizzle {
+                total = quote! { { assert!((#columns as ::core::primitive::usize).is_multiple_of(32), "xor32 columns must be divisible by 32"); #total } };
+            }
             total = quote! { match (#total).checked_add(#columns as ::core::primitive::usize) { Some(n) => n, None => panic!("pipeline columns overflow") } };
         }
-        syn::parse_quote! { match (#total).checked_mul(2 * #rows * ::core::mem::size_of::<#element>()) { Some(n) => n, None => panic!("pipeline shared memory overflow") } }
+        syn::parse_quote! { { let rows: ::core::primitive::usize = #rows; assert!(rows.wrapping_sub(1) < 64, "pipeline rows must be in 1..=64"); match (#total).checked_mul(2 * rows * ::core::mem::size_of::<#element>()) { Some(n) => n, None => panic!("pipeline shared memory overflow") } } }
     }
 
     pub(crate) fn body(&self, staged: bool) -> syn::Block {
         let callbacks = &self.callbacks.stmts;
-        let rows = self.rows;
+        let rows = remap(&self.rows);
         let count = remap(&self.iterations);
         let iterations = internal_ident("__cuda_pipeline_iterations");
         let iteration = internal_ident("__cuda_pipeline_iteration");
@@ -345,6 +374,7 @@ impl BlockPipeline {
         let mut names = Vec::new();
         let mut views = Vec::new();
         let mut copies = Vec::new();
+        let mut offsets = Vec::new();
         let mut total = quote! { 0usize };
         let pointer = internal_ident("__cuda_pipeline_storage");
         let copy_iteration = internal_ident("__cuda_pipeline_copy_iteration");
@@ -367,15 +397,27 @@ impl BlockPipeline {
             let columns = remap(&source.columns);
             let stride = remap(&source.stride);
             let base = remap(&source.offset);
+            let offset = internal_ident(&format!("__cuda_pipeline_offset_{i}"));
+            offsets.push(quote! { let #offset: ::core::primitive::usize = if #iterations > 0 { #base } else { 0 }; });
             let guard = &guards[i];
             let view = internal_ident(&format!("__cuda_pipeline_view_{i}"));
             names.push(view.clone());
+            let layout = if source.swizzle {
+                quote! { .with_xor32() }
+            } else {
+                quote! {}
+            };
+            let destination = if source.swizzle {
+                quote! { (__cuda_pipeline_row * #columns + (__cuda_pipeline_col & !31usize) + ((__cuda_pipeline_col ^ __cuda_pipeline_row) & 31usize)) }
+            } else {
+                quote! { __cuda_pipeline_lane }
+            };
             if staged {
                 views.push(quote! {
                     // SAFETY: this slot was fully initialized, its copies completed,
                     // and all block threads synchronized before any borrowed view.
                     let #guard = unsafe { ::cuda_device::shared::__ReadOnlyTile::from_initialized(#pointer.wrapping_add(#slot * __cuda_pipeline_extent + #total), #rows * #columns) };
-                    let #view = ::cuda_device::shared::BlockTile::new(#guard.as_slice(), 0, #rows, #columns, #columns);
+                    let #view = ::cuda_device::shared::BlockTile::new(#guard.as_slice(), 0, #rows, #columns, #columns)#layout;
                 });
                 let threads = self.threads as usize;
                 copies.push(quote! {
@@ -388,14 +430,14 @@ impl BlockPipeline {
                         let __cuda_pipeline_src = (#copy_iteration).checked_mul(#rows)
                             .and_then(|n| n.checked_add(__cuda_pipeline_row))
                             .and_then(|n| n.checked_mul(#stride))
-                            .and_then(|n| n.checked_add(#base))
+                            .and_then(|n| n.checked_add(#offset))
                             .and_then(|n| n.checked_add(__cuda_pipeline_col));
                         // SAFETY: lanes partition this writable slot. It is disjoint
                         // from the current readable slot. Source addresses are checked,
                         // element alignment is preserved, and the scheduler completes
                         // every issuing thread's copies before publishing or reusing it.
                         unsafe {
-                            let dst = #pointer.add(__cuda_pipeline_copy_slot * __cuda_pipeline_extent + #total + __cuda_pipeline_lane);
+                            let dst = #pointer.add(__cuda_pipeline_copy_slot * __cuda_pipeline_extent + #total + #destination);
                             if let Some(src) = __cuda_pipeline_src.filter(|&n| n < #name.len()) {
                                 #copy(dst.cast::<u32>(), #name.as_ptr().add(src).cast::<u32>());
                             } else { dst.write(0 as #element); }
@@ -405,7 +447,7 @@ impl BlockPipeline {
                 });
             } else {
                 views.push(quote! {
-                    let __cuda_pipeline_base = (#iteration).checked_mul(#rows).and_then(|n| n.checked_mul(#stride)).and_then(|n| n.checked_add(#base)).unwrap_or(::core::primitive::usize::MAX);
+                    let __cuda_pipeline_base = (#iteration).checked_mul(#rows).and_then(|n| n.checked_mul(#stride)).and_then(|n| n.checked_add(#offset)).unwrap_or(::core::primitive::usize::MAX);
                     let #view = ::cuda_device::shared::BlockTile::new(#name, __cuda_pipeline_base, #rows, #columns, #stride);
                 });
             }
@@ -416,6 +458,7 @@ impl BlockPipeline {
                 #(#callbacks)*
                 let #iterations: ::core::primitive::usize = #count;
                 let mut #state = init();
+                #(#offsets)*
                 for #iteration in 0..#iterations { #(#views)* step(&mut #state, #iteration, #(#names),*); }
                 finish(#state);
             }};
@@ -425,6 +468,7 @@ impl BlockPipeline {
         syn::parse_quote! {{
             #(#callbacks)*
             let #iterations: ::core::primitive::usize = #count;
+            #(#offsets)*
             let __cuda_pipeline_extent = (#bytes) / (2 * ::core::mem::size_of::<#element>());
             // SAFETY: the typed launch contract reserves exactly two aligned slots.
             let #pointer = ::cuda_device::DynamicSharedArray::<#element, 16>::get();
@@ -453,17 +497,14 @@ impl BlockPipeline {
                     unsafe { ::cuda_device::async_copy::cp_async_commit_group(); }
                 }
                 { #(#views)* step(&mut #state, #iteration, #(#names),*); }
-                // No shared view can outlive the callback. All readers finish before
-                // this slot can become writable in the following iteration.
-                // SAFETY: every launched thread follows the generated schedule.
-                // Barrier 15 is isolated from safe user barriers on slot 0.
-                unsafe { ::cuda_device::barrier::barrier_cta_sync_aligned(15, #threads); }
                 if #iteration + 1 < #iterations {
                     // SAFETY: the issuing thread waits before any reader gets a view.
                     unsafe { ::cuda_device::async_copy::cp_async_wait_all(); }
-                    // SAFETY: every launched thread follows the generated schedule.
-                // Barrier 15 is isolated from safe user barriers on slot 0.
-                unsafe { ::cuda_device::barrier::barrier_cta_sync_aligned(15, #threads); }
+                    // SAFETY: this publication barrier also waits for all previous
+                    // readers before the next iteration can overwrite their slot.
+                    // No tile borrow can escape the callback. Every launched thread
+                    // follows this schedule, independently of user barriers on slot 0.
+                    unsafe { ::cuda_device::barrier::barrier_cta_sync_aligned(15, #threads); }
                 }
             }
             finish(#state);
@@ -490,7 +531,7 @@ fn remap(expr: &Expr) -> Expr {
     }
     let mut result = expr.clone();
     syn::visit_mut::VisitMut::visit_expr_mut(&mut Cast, &mut result);
-    result
+    syn::parse_quote! { (#result) }
 }
 
 /// Derive both the host's exact resource proof and the device alignment marker.

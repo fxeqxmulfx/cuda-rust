@@ -558,13 +558,23 @@ state. The ordinary device helper reads global-memory views and contains no
 collective schedule, so calling it under divergent control flow does not
 reuse shared storage.
 
-`rows` is a literal in 1..=64. Columns and row strides use integer arithmetic
-on `usize` const parameters; iterations and offsets may also use `usize`
+`rows` uses integer arithmetic on `usize` const parameters and must evaluate
+to 1..=64. Columns and row strides use the same constant expressions;
+iterations and offsets may also use `usize`
 kernel scalars and the block index `block`. Expressions cannot call user code
 or read thread-varying memory. Sources have the same primitive numeric element
 type. Their readable bounds and arithmetic overflow are checked; unavailable
 elements are zero-filled. `BlockTile::get` checks row, column, and backing-slice
-bounds. Each iteration advances the source by `rows * stride` elements.
+bounds. `BlockTile::load` performs the same checks and returns a copied value,
+using its default for unavailable coordinates or overflow. Uniform source offsets
+are evaluated once, and remain unevaluated when there are no iterations. Each iteration advances the source by `rows * stride` elements.
+
+A source can request `layout = xor32` when its column count is divisible by
+32. The entry stores column `c` of row `r` at
+`(c & !31) + ((c ^ r) & 31)` within that row, and `BlockTile::get` applies the
+same permutation. Both row-wise and column-wise warp reads of 32-bit elements
+then use distinct shared-memory banks. The layout preserves the exact allocation
+size and checked source bounds. Ordinary helpers keep the original global layout.
 
 The typed host launcher derives an exact shared-memory requirement of
 `2 * rows * sum(columns) * size_of::<element>()`, 16-byte alignment, and minimum

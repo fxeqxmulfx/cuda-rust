@@ -614,6 +614,7 @@ pub struct BlockTile<'a, T> {
     rows: usize,
     columns: usize,
     stride: usize,
+    xor32: bool,
 }
 impl<'a, T> BlockTile<'a, T> {
     #[inline(always)]
@@ -624,18 +625,56 @@ impl<'a, T> BlockTile<'a, T> {
             rows,
             columns,
             stride,
+            xor32: false,
         }
+    }
+    /// Permute columns within each 32-element group to avoid shared-bank
+    /// conflicts when a warp reads either rows or columns. Rows must be stored
+    /// with the same XOR permutation; complete 32-column groups are required.
+    #[inline(always)]
+    pub fn with_xor32(mut self) -> Self {
+        assert!(
+            self.columns.is_multiple_of(32),
+            "xor32 columns must be divisible by 32"
+        );
+        self.xor32 = true;
+        self
     }
     #[inline(always)]
     pub fn get(&self, row: usize, column: usize) -> Option<&T> {
+        self.data.get(self.index(row, column)?)
+    }
+
+    /// Read one element, returning the default value for unavailable coordinates
+    /// or arithmetic overflow. This avoids a reference-valued intermediate in
+    /// numerical kernels while retaining the same checked bounds as `get`.
+    #[inline(always)]
+    pub fn load(&self, row: usize, column: usize) -> T
+    where
+        T: Copy + Default,
+    {
+        if let Some(index) = self.index(row, column)
+            && index < self.data.len()
+        {
+            self.data[index]
+        } else {
+            T::default()
+        }
+    }
+
+    #[inline(always)]
+    fn index(&self, row: usize, column: usize) -> Option<usize> {
         if row >= self.rows || column >= self.columns {
             return None;
         }
-        let index = row
-            .checked_mul(self.stride)?
+        let column = if self.xor32 {
+            (column & !31) + ((column ^ row) & 31)
+        } else {
+            column
+        };
+        row.checked_mul(self.stride)?
             .checked_add(self.offset)?
-            .checked_add(column)?;
-        self.data.get(index)
+            .checked_add(column)
     }
 }
 
@@ -643,12 +682,69 @@ impl<'a, T> BlockTile<'a, T> {
 mod block_tile_tests {
     use super::BlockTile;
     #[test]
+    fn xor32_preserves_elements_and_unique_row_and_column_banks() {
+        for columns in [32, 64, 128] {
+            let mut data = [0usize; 8192];
+            let mut written = [false; 8192];
+            for row in 0..64 {
+                for column in 0..columns {
+                    let physical = row * columns + (column & !31) + ((column ^ row) & 31);
+                    assert!(!written[physical]);
+                    written[physical] = true;
+                    data[physical] = row * columns + column;
+                }
+            }
+            assert!(written[..64 * columns].iter().all(|&value| value));
+            let tile = BlockTile::new(&data, 0, 64, columns, columns).with_xor32();
+            for row in 0..64 {
+                for column in 0..columns {
+                    assert_eq!(tile.get(row, column), Some(&(row * columns + column)));
+                    assert_eq!(tile.load(row, column), row * columns + column);
+                }
+                for group in 0..columns / 32 {
+                    let mut banks = [false; 32];
+                    for lane in 0..32 {
+                        let column = group * 32 + lane;
+                        let bank = (column ^ row) & 31;
+                        assert!(!banks[bank]);
+                        banks[bank] = true;
+                    }
+                }
+            }
+            for column in 0..columns {
+                for group in 0..2 {
+                    let mut banks = [false; 32];
+                    for lane in 0..32 {
+                        let row = group * 32 + lane;
+                        let bank = (column ^ row) & 31;
+                        assert!(!banks[bank]);
+                        banks[bank] = true;
+                    }
+                }
+            }
+            assert_eq!(tile.get(64, 0), None);
+            assert_eq!(tile.get(0, columns), None);
+            assert_eq!(tile.load(64, 0), 0);
+            assert_eq!(tile.load(0, columns), 0);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "xor32 columns must be divisible by 32")]
+    fn xor32_rejects_incomplete_column_groups() {
+        BlockTile::new(&[0u32; 65], 0, 1, 65, 65).with_xor32();
+    }
+
+    #[test]
     fn rows_columns_tail_and_overflow_are_checked() {
         let data = [1u32, 2, 3, 4, 5];
         let view = BlockTile::new(&data, 1, 3, 2, 2);
         assert_eq!(view.get(0, 0), Some(&2));
         assert_eq!(view.get(1, 1), Some(&5));
         assert_eq!(view.get(2, 0), None);
+        assert_eq!(view.load(2, 0), 0);
+        assert_eq!(view.load(1, 1), 5);
+        assert_eq!(BlockTile::new(&data, usize::MAX, 2, 2, 2).load(0, 1), 0);
         assert_eq!(view.get(0, 2), None);
         assert_eq!(view.get(3, 0), None);
         assert_eq!(BlockTile::new(&data, usize::MAX, 2, 2, 2).get(0, 1), None);

@@ -38,7 +38,7 @@ fn repeated_tiles_are_entry_only_and_complete_before_borrowing() {
     assert!(matches!(entry.sig.safety, syn::Safety::Unsafe(_)));
     let body = quote::quote!(#entry).to_string();
     assert!(body.find("cp_async_wait_all").unwrap() < body.find("from_initialized").unwrap());
-    assert_eq!(body.matches("barrier_cta_sync_aligned").count(), 3);
+    assert_eq!(body.matches("barrier_cta_sync_aligned").count(), 2);
 }
 #[test]
 fn callbacks_cannot_bypass_the_collective_schedule() {
@@ -82,6 +82,55 @@ fn callbacks_cannot_bypass_the_collective_schedule() {
             unreachable!()
         };
         input_arg.attrs = vec![syn::parse_quote!(#source)];
+        assert!(prepare_pipeline(&mut input).is_err());
+    }
+}
+
+#[test]
+fn const_rows_and_xor32_layout_preserve_expression_grouping() {
+    let mut input = valid();
+    input.attrs[1] = parse_quote!(#[block_pipeline(rows = D / 32 + 1, iterations = 2)]);
+    let syn::FnArg::Typed(arg) = &mut input.sig.inputs[1] else {
+        unreachable!()
+    };
+    arg.attrs = vec![
+        parse_quote!(#[tile_source(columns = D + 32, stride = D + 64, offset = block + 7, layout = xor32)]),
+    ];
+    let pipeline = prepare_pipeline(&mut input).unwrap().unwrap();
+    let bytes = pipeline.bytes();
+    let bytes = quote::quote!(#bytes).to_string();
+    assert!(bytes.contains("pipeline rows must be in 1..=64"));
+    assert!(bytes.contains("is_multiple_of (32)"));
+    let staged = pipeline.body(true);
+    let body = quote::quote!(#staged).to_string();
+    assert!(body.contains("with_xor32"));
+    assert!(body.contains("__cuda_pipeline_col ^ __cuda_pipeline_row"));
+    let global = pipeline.body(false);
+    assert!(!quote::quote!(#global).to_string().contains("with_xor32"));
+    syn::parse2::<syn::File>(generic_kernel_no_instantiation_tokens(input, None)).unwrap();
+}
+
+#[test]
+fn tile_rows_are_constant_and_layout_names_are_checked() {
+    for rows in [
+        quote::quote!(0),
+        quote::quote!(65),
+        quote::quote!(count),
+        quote::quote!(thread::threadIdx_x()),
+    ] {
+        let mut input = valid();
+        input.attrs[1] = parse_quote!(#[block_pipeline(rows = #rows, iterations = 2)]);
+        assert!(prepare_pipeline(&mut input).is_err());
+    }
+    for source in [
+        quote::quote!(#[tile_source(columns = D, stride = D, offset = 0, layout = row_major)]),
+        quote::quote!(#[tile_source(columns = D, stride = D, offset = 0, layout = xor32, layout = xor32)]),
+    ] {
+        let mut input = valid();
+        let syn::FnArg::Typed(arg) = &mut input.sig.inputs[1] else {
+            unreachable!()
+        };
+        arg.attrs = vec![parse_quote!(#source)];
         assert!(prepare_pipeline(&mut input).is_err());
     }
 }

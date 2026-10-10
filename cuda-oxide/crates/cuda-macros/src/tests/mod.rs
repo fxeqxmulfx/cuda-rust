@@ -6,3 +6,5 @@
 mod cuda_module;
 mod kernel;
 mod launch;
+
+mod device;

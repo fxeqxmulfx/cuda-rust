@@ -115,20 +115,25 @@ pub(crate) fn device_entry(_attr: TokenStream, item: TokenStream) -> TokenStream
 /// Handles both non-generic and generic device functions:
 /// - **Non-generic**: `#[no_mangle]` on the prefixed function, `#[inline(always)]` wrapper.
 /// - **Generic**: No `#[no_mangle]` (generics use mangled symbols), `#[inline(never)]` on
-///   the prefixed function (so monomorphizations appear in CGUs for the collector),
+///   the prefixed function by default, preserving explicit inline policies,
 ///   `#[inline(always)]` wrapper with generics + turbofish forwarding.
 ///
 /// This mirrors the pattern used by `#[kernel]` for generic kernels
 /// (see `generate_generic_kernel_no_instantiation`).
-fn generate_device_function(mut input: ItemFn) -> TokenStream {
+fn generate_device_function(input: ItemFn) -> TokenStream {
+    device_function_tokens(input).into()
+}
+
+/// Pure expansion entry point for inline-policy regression tests.
+pub(crate) fn device_function_tokens(mut input: ItemFn) -> proc_macro2::TokenStream {
     if let Some(err) = reject_reserved_name(&input.sig.ident) {
-        return err;
+        return err.into();
     }
     if let Some(err) = impl_trait_parameter_error(&input, "device function") {
-        return err.to_compile_error().into();
+        return err.to_compile_error();
     }
     if let Err(err) = rewrite_loop_unroll_attrs(&mut input) {
-        return err.to_compile_error().into();
+        return err.to_compile_error();
     }
     inject_device_thread_index_scope(&mut input);
 
@@ -148,22 +153,33 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
 
     let (wrapper_inputs, params) = match forwarding_inputs(&input.sig.inputs) {
         Ok(forwarding) => forwarding,
-        Err(err) => return err.to_compile_error().into(),
+        Err(err) => return err.to_compile_error(),
     };
 
     // Rename the original function with the prefix
     input.sig.ident = new_name.clone();
 
     if has_generics {
+        // Keep default helpers visible to the collector, but never override
+        // the author's explicit policy. Duplicate inline attributes currently
+        // make rustc ignore the source hint and are becoming a hard error.
+        let default_inline = if input
+            .attrs
+            .iter()
+            .any(|attribute| contains_inline_policy(&attribute.meta))
+        {
+            quote! {}
+        } else {
+            quote! { #[inline(never)] }
+        };
         // Generic device function: mirrors the generic kernel pattern.
         //
         // - No #[no_mangle] — generic functions use mangled symbol names per
         //   monomorphization (e.g., `cuda_oxide_device_<hash>_add::<f32>` gets a
         //   unique mangled name). #[no_mangle] requires a single concrete symbol.
         //
-        // - #[inline(never)] on the prefixed function — ensures each monomorphization
-        //   appears as a distinct CGU item so the collector can find it. If it were
-        //   inlined, the function would disappear from the CGU.
+        // - Default #[inline(never)] preserves collector visibility. Explicit
+        //   inline policies are kept; inlined bodies remain in calling kernels.
         //
         // - The wrapper forwards type parameters via turbofish:
         //   `cuda_oxide_device_<hash>_add::<T>(a, b)`.
@@ -178,7 +194,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
         };
 
         let expanded = quote! {
-            #[inline(never)]
+            #default_inline
             #input
 
             /// Wrapper for the generic device function with the original name.
@@ -188,7 +204,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
             }
         };
 
-        TokenStream::from(expanded)
+        expanded
     } else {
         let call = quote! { #new_name(#(#params),*) };
         let call = if matches!(unsafety, syn::Safety::Unsafe(_)) {
@@ -208,7 +224,7 @@ fn generate_device_function(mut input: ItemFn) -> TokenStream {
             }
         };
 
-        TokenStream::from(expanded)
+        expanded
     }
 }
 
@@ -320,4 +336,22 @@ fn generate_device_extern_block(mut input: ItemForeignMod) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+/// Conditional source hints also own the policy, whether their condition is
+/// enabled in this build or not. Avoid injecting a competing unconditional hint.
+fn contains_inline_policy(meta: &syn::Meta) -> bool {
+    use syn::parse::Parser;
+    if meta.path().is_ident("inline") {
+        return true;
+    }
+    let syn::Meta::List(list) = meta else {
+        return false;
+    };
+    if !list.path.is_ident("cfg_attr") {
+        return false;
+    }
+    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .is_ok_and(|parts| parts.iter().skip(1).any(contains_inline_policy))
 }

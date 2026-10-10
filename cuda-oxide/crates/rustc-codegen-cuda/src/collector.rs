@@ -1090,11 +1090,6 @@ struct DeviceCollector<'tcx> {
     device_externs: Vec<DeviceExternDecl>,
     /// DefIds of device externs already seen (prevents duplicates).
     seen_device_externs: HashSet<DefId>,
-    /// Whether we've already emitted the "`DynamicSharedArray::get`
-    /// needs `shared_mem_bytes` set at launch" warning. Fired at most
-    /// once per program — the message is procedural advice about the
-    /// kernel-launch contract, not anything per-call.
-    warned_dynamic_shared_array: bool,
     /// Print progress to stderr.
     verbose: bool,
 }
@@ -1110,7 +1105,6 @@ impl<'tcx> DeviceCollector<'tcx> {
             result: Vec::new(),
             device_externs: Vec::new(),
             seen_device_externs: HashSet::new(),
-            warned_dynamic_shared_array: false,
             verbose,
         }
     }
@@ -1514,20 +1508,6 @@ impl<'tcx> DeviceCollector<'tcx> {
         let TyKind::FnDef(def_id, args) = ty.kind() else {
             return;
         };
-        let fn_path = self.tcx.def_path_str(*def_id);
-        if fn_path.contains("DynamicSharedArray")
-            && (fn_path.contains("::get")
-                || fn_path.contains("::get_raw")
-                || fn_path.contains("::offset"))
-            && !self.warned_dynamic_shared_array
-        {
-            self.warned_dynamic_shared_array = true;
-            self.tcx.sess.dcx().span_warn(
-                const_op.span,
-                "`DynamicSharedArray` returns CUDA dynamic shared memory; make sure the kernel launch config provides enough `shared_mem_bytes`",
-            );
-        }
-
         // CRITICAL: Substitute the caller's args into the callee's args.
         //
         // When walking the MIR of a generic function like

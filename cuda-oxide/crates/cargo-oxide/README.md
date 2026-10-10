@@ -6,7 +6,7 @@ Replaces the previous `xtask` pattern with a proper cargo subcommand that works 
 
 ## Installation
 
-**Internal developers** (inside the cuda-oxide repo): no installation needed. The workspace alias makes `cargo oxide` work immediately.
+**Internal developers** (inside the cuda-oxide repo): install the command from `cuda-oxide/` with `cargo install --locked --path crates/cargo-oxide`. In a cuda-oxide checkout, the installed command runs the `cargo-oxide` of that checkout.
 
 **External users**:
 

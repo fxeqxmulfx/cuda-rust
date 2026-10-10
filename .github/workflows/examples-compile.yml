@@ -44,6 +44,10 @@ jobs:
     # Leave job-level headroom around the 50-minute full compile and the
     # focused 10-minute materialization gate, plus toolkit/LLVM setup.
     timeout-minutes: 75
+    env:
+      # The runner has no installed `cargo-oxide`. This alias runs the
+      # `cargo-oxide` of the checkout.
+      CARGO_ALIAS_OXIDE: run --package cargo-oxide --
     steps:
       - name: Clone repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

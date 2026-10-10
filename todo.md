@@ -32,6 +32,6 @@ Make one commit with a test for each fix.
 
 ## Maintenance
 
-- [ ] In `cuda-oxide/`, the cargo alias `oxide` in `.cargo/config.toml` has the
+- [x] In `cuda-oxide/`, the cargo alias `oxide` in `.cargo/config.toml` has the
   same name as an installed `cargo-oxide` subcommand. Cargo then gives a
   warning that this will become an error.

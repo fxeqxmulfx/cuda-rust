@@ -280,7 +280,7 @@ The other three are not needed to build: `rust-analyzer` powers IDE support, `cl
 
 `cargo-oxide` is the cargo subcommand that drives the entire build pipeline (`cargo oxide run`, `build`, `debug`, `pipeline`, and the rest -- the Command reference at the end of this section lists all of them).
 
-**Inside the cuda-oxide repo**, it works out of the box via a workspace alias -- no extra install step.
+**Inside the cuda-oxide repo**, install it from `cuda-oxide/` with `cargo install --locked --path crates/cargo-oxide`. In a checkout, the installed command runs the `cargo-oxide` of that checkout.
 
 **For use outside the repo** (your own projects), install it with the pinned nightly toolchain:
 

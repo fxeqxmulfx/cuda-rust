@@ -126,7 +126,7 @@ quote = "1.0.47"
 syn = { version = "3.0.6", features = ["full", "visit", "visit-mut"] }
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 
-# `cargo oxide` runs through the workspace's dev-profile Cargo alias. Its
+# In a checkout, `cargo oxide` runs the dev-profile build of `cargo-oxide`. Its
 # backend fingerprint hashes a large debug shared object on every invocation;
 # optimize only SHA-256 so exact content fingerprinting remains inexpensive.
 [profile.dev.package.sha2]

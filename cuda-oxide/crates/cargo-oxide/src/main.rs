@@ -41,8 +41,8 @@ mod commands;
 /// Top-level CLI structure parsed by clap.
 ///
 /// The binary is named `cargo-oxide` so that `cargo oxide <subcommand>` works
-/// as a cargo subcommand. The workspace alias in `.cargo/config.toml` also
-/// routes `cargo oxide` here when run inside the repo.
+/// as a cargo subcommand. In a cuda-oxide checkout, the command runs the
+/// `cargo-oxide` of the checkout (see [`run_checkout_command`]).
 #[derive(Parser)]
 #[command(
     name = "cargo-oxide",
@@ -648,12 +648,42 @@ fn fuzz_schedule_disposition(
     }
 }
 
+/// Runs the `cargo-oxide` of the cuda-oxide checkout that holds the current
+/// directory, and exits with its status.
+///
+/// Cargo gives `oxide` as the first argument to an installed `cargo-oxide`,
+/// which can be older or newer than the checkout. `cargo run` does not give
+/// `oxide`, thus the build of the checkout runs the command itself. Above
+/// `cuda-oxide/` in the combined repository, the toolchain is not the SIMT
+/// toolchain, thus the installed build runs the command there.
+fn run_checkout_command(args: &[String]) {
+    let Some(root) = backend::find_workspace_root() else {
+        return;
+    };
+    if !root.join("crates/cargo-oxide/Cargo.toml").is_file() {
+        return;
+    }
+    let status = std::process::Command::new("cargo")
+        .arg("run")
+        .arg("--manifest-path")
+        .arg(root.join("Cargo.toml"))
+        .args(["--package", "cargo-oxide", "--"])
+        .args(args)
+        .status()
+        .unwrap_or_else(|error| {
+            eprintln!("Error: could not run cargo: {error}");
+            std::process::exit(1);
+        });
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 fn main() {
     // Handle both invocation methods:
     // 1. Cargo subcommand: `cargo oxide run vecadd` → argv = ["cargo-oxide", "oxide", "run", "vecadd"]
-    // 2. Cargo alias:      `cargo oxide run vecadd` → argv = ["target/.../cargo-oxide", "run", "vecadd"]
+    // 2. `cargo run`:      `cargo run -p cargo-oxide -- run vecadd` → argv = ["target/.../cargo-oxide", "run", "vecadd"]
     let args: Vec<String> = std::env::args().collect();
     let effective_args = if args.get(1).map(|s| s.as_str()) == Some("oxide") {
+        run_checkout_command(&args[2..]);
         let mut filtered = vec![args[0].clone()];
         filtered.extend(args[2..].iter().cloned());
         filtered

@@ -159,7 +159,7 @@ cargo oxide update
 
 #### cargo-oxide
 
-From `cuda-oxide/`, `cargo oxide` works out of the box via a workspace alias.
+From `cuda-oxide/`, install it with `cargo install --locked --path crates/cargo-oxide`. In a cuda-oxide checkout, the installed command runs the `cargo-oxide` of that checkout.
 
 For use outside the repo (your own projects), install it with the pinned nightly toolchain:
 

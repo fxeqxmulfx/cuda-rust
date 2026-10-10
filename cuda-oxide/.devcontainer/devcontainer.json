@@ -6,6 +6,7 @@
   },
   "workspaceMount": "source=${localWorkspaceFolder}/..,target=/workspaces/cuda-rust,type=bind",
   "workspaceFolder": "/workspaces/cuda-rust/cuda-oxide",
+  "postCreateCommand": "cargo install --locked --path crates/cargo-oxide",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "username": "vscode",
